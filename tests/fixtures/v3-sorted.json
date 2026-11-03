@@ -42,6 +42,7 @@
       "defaultRepo": "vllm-project/vllm",
       "boardWidth": 520,
       "sort": "updated"
-    }
+    },
+    "changed": []
   }
 }

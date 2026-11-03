@@ -5,20 +5,53 @@
     "pingboard.githubToken": "test-token",
     "pingboard.v3.pingboard-tester.board": {
       "groups": [
-        { "id": "g1", "name": "Tracking", "collapsed": false },
+        {
+          "id": "g1",
+          "name": "Tracking",
+          "collapsed": false
+        },
         {
           "id": "gsearch",
           "name": "Review requests",
           "collapsed": true,
           "query": "repo:vllm-project/vllm review-requested:@me",
-          "dismissed": ["vllm-project/vllm#60001", "vllm-project/vllm#60002"]
+          "dismissed": [
+            "vllm-project/vllm#60001",
+            "vllm-project/vllm#60002"
+          ]
         }
       ],
       "pins": [
-        { "key": "vllm-project/vllm#60447", "repo": "vllm-project/vllm", "number": 60447, "group": "g1", "addedAt": 1791470000000 },
-        { "key": "vllm-project/vllm#60456", "repo": "vllm-project/vllm", "number": 60456, "group": "gsearch", "addedAt": 1791470001000, "via": "gsearch" },
-        { "key": "vllm-project/vllm#60460", "repo": "vllm-project/vllm", "number": 60460, "group": "g1", "addedAt": 1791470002000, "via": "gsearch" },
-        { "key": "vllm-project/vllm#60470", "repo": "vllm-project/vllm", "number": 60470, "group": "gsearch", "addedAt": 1791470003000 }
+        {
+          "key": "vllm-project/vllm#60447",
+          "repo": "vllm-project/vllm",
+          "number": 60447,
+          "group": "g1",
+          "addedAt": 1791470000000
+        },
+        {
+          "key": "vllm-project/vllm#60456",
+          "repo": "vllm-project/vllm",
+          "number": 60456,
+          "group": "gsearch",
+          "addedAt": 1791470001000,
+          "via": "gsearch"
+        },
+        {
+          "key": "vllm-project/vllm#60460",
+          "repo": "vllm-project/vllm",
+          "number": 60460,
+          "group": "g1",
+          "addedAt": 1791470002000,
+          "via": "gsearch"
+        },
+        {
+          "key": "vllm-project/vllm#60470",
+          "repo": "vllm-project/vllm",
+          "number": 60470,
+          "group": "gsearch",
+          "addedAt": 1791470003000
+        }
       ]
     },
     "pingboard.v3.pingboard-tester.prefs": {
@@ -30,19 +63,31 @@
     }
   },
   "expect": {
-    "groups": ["Tracking", "Review requests"],
-    "collapsed": ["Review requests"],
+    "groups": [
+      "Tracking",
+      "Review requests"
+    ],
+    "collapsed": [
+      "Review requests"
+    ],
     "pins": [
       "vllm-project/vllm#60447 in Tracking",
       "vllm-project/vllm#60456 in Review requests",
       "vllm-project/vllm#60460 in Tracking",
       "vllm-project/vllm#60470 in Review requests"
     ],
-    "searches": ["Review requests: repo:vllm-project/vllm review-requested:@me; dismissed vllm-project/vllm#60001 vllm-project/vllm#60002"],
+    "searches": [
+      "Review requests: repo:vllm-project/vllm review-requested:@me; dismissed vllm-project/vllm#60001 vllm-project/vllm#60002"
+    ],
     "searchPinned": [
       "vllm-project/vllm#60456 by Review requests",
       "vllm-project/vllm#60460 by Review requests"
     ],
-    "prefs": { "interval": 60, "defaultRepo": "vllm-project/vllm", "unpinClosed": true }
+    "prefs": {
+      "interval": 60,
+      "defaultRepo": "vllm-project/vllm",
+      "unpinClosed": true
+    },
+    "changed": []
   }
 }

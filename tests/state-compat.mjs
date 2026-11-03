@@ -1,7 +1,8 @@
 /* Would this change lose or mangle a board that people already have saved?
 
    For every fixture in tests/fixtures (the browser storage of an existing user):
-     1. the app under test loads it and shows the same groups, pins and preferences;
+     1. the app under test loads it and shows the same groups, pins, preferences and
+        "changed since you last looked" dots;
      2. a reload gives the same result (what it wrote back is readable);
      3. with --base, the previous version loads the fixture first and writes its own
         state, then the app under test takes over that storage and nothing changes.
@@ -25,7 +26,7 @@ function option(name) {
   return at === -1 ? null : path.resolve(process.argv[at + 1]);
 }
 
-function mockRepository(owner, name, number) {
+function mockRepository(owner, name, number, login) {
   const oid = "a".repeat(40);
   const now = new Date().toISOString();
   return {
@@ -37,7 +38,11 @@ function mockRepository(owner, name, number) {
       baseRefName: "main", headRefOid: oid, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", reviewDecision: null,
       viewerCanUpdateBranch: true, viewerCanEnableAutoMerge: true, autoMergeRequest: null,
       additions: 1, deletions: 1, changedFiles: 1,
-      labels: { nodes: [] }, latestOpinionatedReviews: { nodes: [] }, reviewRequests: { nodes: [] }, comments: { nodes: [] },
+      labels: { nodes: [] }, latestOpinionatedReviews: { nodes: [] }, reviewRequests: { nodes: [] }, reviews: { nodes: [] },
+      comments: { nodes: [
+        { author: { login: "someone" }, bodyText: "a comment", createdAt: "2026-01-01T00:00:00Z", url: "https://github.com/" },
+        { author: { login }, bodyText: "the user's own comment", createdAt: "2026-01-02T00:00:00Z", url: "https://github.com/" }
+      ] },
       commits: { nodes: [{ commit: { oid, committedDate: now, statusCheckRollup: null } }] }
     }
   };
@@ -51,9 +56,9 @@ function mockGitHub(request, login) {
   const { query, variables = {} } = JSON.parse(request.postData() || "{}");
   if (query.includes("pullRequest(number:")) {
     // Older versions read one PR per request; newer ones batch them as pr0, pr1, … with suffixed variables.
-    if ("number" in variables) return { data: { repository: mockRepository(variables.owner, variables.name, variables.number) } };
+    if ("number" in variables) return { data: { repository: mockRepository(variables.owner, variables.name, variables.number, login) } };
     const aliases = Object.keys(variables).filter((key) => /^number\d+$/.test(key)).map((key) => key.slice(6));
-    return { data: Object.fromEntries(aliases.map((i) => [`pr${i}`, mockRepository(variables[`owner${i}`], variables[`name${i}`], variables[`number${i}`])])) };
+    return { data: Object.fromEntries(aliases.map((i) => [`pr${i}`, mockRepository(variables[`owner${i}`], variables[`name${i}`], variables[`number${i}`], login)])) };
   }
   if (query.includes("history(first:")) return { data: { repository: { ref: { target: { history: { nodes: [] } } } } } };
   if (query.includes("search(")) return { data: { search: { issueCount: 0, nodes: [] } } };
@@ -100,7 +105,9 @@ async function load(session, dir) {
   // `state` is the app's top-level state object; signed in means the saved board has been read.
   await session.page.waitForFunction(() => typeof state !== "undefined" && Boolean(state.user), null, { timeout: 15000 });
   await session.page.waitForTimeout(1500);   // let the pin refreshes land and be written back
-  const snapshot = await session.page.evaluate(() => JSON.parse(JSON.stringify({ board: state.board, prefs: state.prefs })));
+  const snapshot = await session.page.evaluate(() => JSON.parse(JSON.stringify({
+    board: state.board, prefs: state.prefs, changed: state.board.pins.filter(hasChanged).map((pin) => pin.key)
+  })));
   const groupName = (id) => snapshot.board.groups.find((group) => group.id === id)?.name ?? `<missing group ${id}>`;
   return {
     groups: snapshot.board.groups.map((group) => group.name),
@@ -109,6 +116,7 @@ async function load(session, dir) {
     searches: snapshot.board.groups.filter((group) => group.query).map((group) => `${group.name}: ${group.query}; dismissed ${(group.dismissed || []).join(" ")}`),
     searchPinned: snapshot.board.pins.filter((pin) => pin.via).map((pin) => `${pin.repo}#${pin.number} by ${groupName(pin.via)}`),
     prefs: snapshot.prefs,
+    changed: snapshot.changed,
     errors: [...session.errors]
   };
 }
@@ -124,6 +132,7 @@ function compare(label, result, expected) {
   check(`${label}: groups`, result.groups, expected.groups);
   check(`${label}: collapsed groups`, result.collapsed, expected.collapsed);
   check(`${label}: pins`, result.pins, expected.pins);
+  check(`${label}: changed dots`, result.changed, expected.changed);
   check(`${label}: group searches`, result.searches, expected.searches || []);
   check(`${label}: search-pinned`, result.searchPinned, expected.searchPinned || []);
   for (const [key, value] of Object.entries(expected.prefs)) check(`${label}: preference ${key}`, result.prefs[key], value);
@@ -153,7 +162,7 @@ for (const name of (await readdir(fixtureDir)).filter((file) => file.endsWith(".
     } catch (error) {
       console.log(`  skipped upgrade check: the base version did not load a board (${error.message.split("\n")[0]})`);
     }
-    if (before) compare("board written by the base version loads", await load(session, head), { ...before, prefs: fixture.expect.prefs });
+    if (before) compare("board written by the base version loads", await load(session, head), { ...before, prefs: fixture.expect.prefs, changed: fixture.expect.changed });
   }
   await session.context.close();
 }
