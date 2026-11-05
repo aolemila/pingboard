@@ -21,6 +21,7 @@
   --merged: #8250df;
   --follow: #b0307c;
   --focus: #1d4ed8;
+  --on-accent: #fff;
   --shadow: 0 16px 36px rgba(20, 27, 22, 0.14);
   --radius: 6px;
 
@@ -29,7 +30,9 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --on-accent: #06140e;
     --bg: #0b0f0c;
     --panel: #131814;
     --panel-soft: #1b211c;
@@ -51,6 +54,224 @@
     --focus: #93c5fd;
     --shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
   }
+}
+
+/* Themes chosen in Settings (data-theme on <html>); without one the system decides. */
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef0ea;
+  --panel: #fbfcf9;
+  --panel-soft: #f1f4ee;
+  --line: #d9dfd5;
+  --line-strong: #b9c2b6;
+  --text: #171c18;
+  --muted: #56635a;
+  --quiet: #66736a;
+  --accent: #0e8a60;
+  --accent-soft: rgba(14, 138, 96, 0.11);
+  --good: #1a7f37;
+  --bad: #cf222e;
+  --warn: #9a6200;
+  --todo: #6639ba;
+  --running: #0b6fb3;
+  --merged: #8250df;
+  --follow: #b0307c;
+  --focus: #1d4ed8;
+  --on-accent: #fff;
+  --shadow: 0 16px 36px rgba(20, 27, 22, 0.14);
+}
+
+:root[data-theme="light-high-contrast"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel-soft: #e7ecf0;
+  --line: #88929d;
+  --line-strong: #20252c;
+  --text: #0e1116;
+  --muted: #20252c;
+  --quiet: #3d444d;
+  --accent: #055d20;
+  --accent-soft: rgba(5, 93, 32, 0.12);
+  --good: #055d20;
+  --bad: #a0111f;
+  --warn: #744500;
+  --todo: #512598;
+  --running: #0349b4;
+  --merged: #622cbc;
+  --follow: #971368;
+  --focus: #0349b4;
+  --on-accent: #fff;
+  --shadow: 0 16px 36px rgba(1, 4, 9, 0.25);
+}
+
+:root[data-theme="light-colorblind"] {
+  color-scheme: light;
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --panel-soft: #eff2f5;
+  --line: #d1d9e0;
+  --line-strong: #b7bfc8;
+  --text: #1f2328;
+  --muted: #59636e;
+  --quiet: #656d76;
+  --accent: #0969da;
+  --accent-soft: rgba(9, 105, 218, 0.1);
+  --good: #0969da;
+  --bad: #bc4c00;
+  --warn: #9a6700;
+  --todo: #8250df;
+  --running: #57606a;
+  --merged: #8250df;
+  --follow: #bf3989;
+  --focus: #0969da;
+  --on-accent: #fff;
+  --shadow: 0 16px 36px rgba(31, 35, 40, 0.14);
+}
+
+:root[data-theme="light-tritanopia"] {
+  color-scheme: light;
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --panel-soft: #eff2f5;
+  --line: #d1d9e0;
+  --line-strong: #b7bfc8;
+  --text: #1f2328;
+  --muted: #59636e;
+  --quiet: #656d76;
+  --accent: #0969da;
+  --accent-soft: rgba(9, 105, 218, 0.1);
+  --good: #0969da;
+  --bad: #cf222e;
+  --warn: #9a6700;
+  --todo: #8250df;
+  --running: #57606a;
+  --merged: #8250df;
+  --follow: #bf3989;
+  --focus: #0969da;
+  --on-accent: #fff;
+  --shadow: 0 16px 36px rgba(31, 35, 40, 0.14);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0f0c;
+  --panel: #131814;
+  --panel-soft: #1b211c;
+  --line: #262e28;
+  --line-strong: #3a453c;
+  --text: #e7efe7;
+  --muted: #a3b0a4;
+  --quiet: #78857c;
+  --accent: #34d399;
+  --accent-soft: rgba(52, 211, 153, 0.11);
+  --good: #3fb950;
+  --bad: #f85149;
+  --warn: #e3a03a;
+  --todo: #b392f0;
+  --running: #58a6ff;
+  --merged: #a371f7;
+  --follow: #f28dc4;
+  --focus: #93c5fd;
+  --on-accent: #06140e;
+  --shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme="dark-dimmed"] {
+  color-scheme: dark;
+  --bg: #22272e;
+  --panel: #2d333b;
+  --panel-soft: #373e47;
+  --line: #444c56;
+  --line-strong: #545d68;
+  --text: #cdd9e5;
+  --muted: #adbac7;
+  --quiet: #a2afbd;
+  --accent: #6bc46d;
+  --accent-soft: rgba(107, 196, 109, 0.14);
+  --good: #6bc46d;
+  --bad: #ff938a;
+  --warn: #daaa3f;
+  --todo: #c4a1ff;
+  --running: #6cb6ff;
+  --merged: #c4a1ff;
+  --follow: #fc8dc7;
+  --focus: #6cb6ff;
+  --on-accent: #1c2128;
+  --shadow: 0 16px 40px rgba(28, 33, 40, 0.6);
+}
+
+:root[data-theme="dark-high-contrast"] {
+  color-scheme: dark;
+  --bg: #010409;
+  --panel: #0a0c10;
+  --panel-soft: #272b33;
+  --line: #7a828e;
+  --line-strong: #9ea7b3;
+  --text: #f0f3f6;
+  --muted: #d9dee3;
+  --quiet: #bdc4cc;
+  --accent: #26cd4d;
+  --accent-soft: rgba(38, 205, 77, 0.16);
+  --good: #26cd4d;
+  --bad: #ff6a69;
+  --warn: #f0b72f;
+  --todo: #cb9eff;
+  --running: #71b7ff;
+  --merged: #cb9eff;
+  --follow: #ff8dd0;
+  --focus: #71b7ff;
+  --on-accent: #010409;
+  --shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+}
+
+:root[data-theme="dark-colorblind"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-soft: #21262d;
+  --line: #30363d;
+  --line-strong: #484f58;
+  --text: #e6edf3;
+  --muted: #9198a1;
+  --quiet: #848d97;
+  --accent: #58a6ff;
+  --accent-soft: rgba(88, 166, 255, 0.12);
+  --good: #58a6ff;
+  --bad: #f0883e;
+  --warn: #d29922;
+  --todo: #bc8cff;
+  --running: #9198a1;
+  --merged: #bc8cff;
+  --follow: #f778ba;
+  --focus: #58a6ff;
+  --on-accent: #0d1117;
+  --shadow: 0 16px 40px rgba(1, 4, 9, 0.6);
+}
+
+:root[data-theme="dark-tritanopia"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-soft: #21262d;
+  --line: #30363d;
+  --line-strong: #484f58;
+  --text: #e6edf3;
+  --muted: #9198a1;
+  --quiet: #848d97;
+  --accent: #58a6ff;
+  --accent-soft: rgba(88, 166, 255, 0.12);
+  --good: #58a6ff;
+  --bad: #ff7b72;
+  --warn: #d29922;
+  --todo: #bc8cff;
+  --running: #9198a1;
+  --merged: #bc8cff;
+  --follow: #f778ba;
+  --focus: #58a6ff;
+  --on-accent: #0d1117;
+  --shadow: 0 16px 40px rgba(1, 4, 9, 0.6);
 }
 
 /* ── base ─────────────────────────────────────────────────────────────── */
@@ -99,11 +320,10 @@ code { font-family: var(--font-mono); font-size: 0.92em; padding: 1px 4px; backg
 }
 .btn:hover:not(:disabled) { border-color: var(--accent); background: var(--panel-soft); }
 .btn:disabled { opacity: 0.45; cursor: default; }
-.btn.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.btn.primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
 .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, #000); }
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 .btn.big { padding: 8px 16px; font-size: 14px; }
-@media (prefers-color-scheme: dark) { .btn.primary { color: #06140e; } }
 
 .link-btn {
   padding: 2px 4px;
