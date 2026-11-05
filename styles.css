@@ -353,7 +353,7 @@ code { font-family: var(--font-mono); font-size: 0.92em; padding: 1px 4px; backg
 .icon-btn:hover { color: var(--bad); background: var(--panel-soft); }
 .icon-btn:focus-visible, .row.cursor .icon-btn { opacity: 1; }
 
-input[type="text"], input[type="search"], input[type="password"], select {
+input[type="text"], input[type="search"], input[type="password"], select, textarea {
   font: inherit;
   color: var(--text);
   background: var(--panel);
@@ -600,6 +600,41 @@ a.num:hover { text-decoration: underline; color: var(--text); }
 @container detail (min-width: 820px) {
   .detail-body { grid-template-columns: minmax(0, 1.25fr) minmax(300px, 1fr); align-items: start; }
 }
+
+/* AI review */
+.report { display: grid; gap: 6px; }
+.report + .report { padding-top: 10px; border-top: 1px dashed var(--line); }
+.report-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12.5px; color: var(--muted); }
+.report-summary { font-size: 13px; white-space: pre-line; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; }
+.verdict-badge, .ai-chip { font-weight: 600; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.verdict-badge { font-size: 12px; padding: 0 8px; }
+.ai-chip { font-size: 11px; padding: 0 6px; }
+.v-block { color: var(--bad); }
+.v-needs-work { color: var(--warn); }
+.v-lgtm { color: var(--good); }
+.v-unknown { color: var(--quiet); }
+
+.report-modal { width: min(1100px, 96vw); max-height: 88vh; }
+.report-head { display: grid; gap: 6px; }
+.report-body { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.report-body > * + * { margin-top: 10px; }
+.report-body :where(ul, ol, pre, table, blockquote, dl, details) { margin-bottom: 0; }
+.report-body :where(ul, ol) { padding-left: 22px; }
+.report-body h1, .report-body h2 { font-size: 18px; margin-top: 22px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+.report-body h3 { font-size: 15px; margin-top: 18px; }
+.report-body h4 { font-size: 14px; margin-top: 14px; }
+.report-body a { color: var(--running); }
+.report-body img { max-width: 100%; }
+.report-body table { display: block; overflow-x: auto; border-collapse: collapse; font-size: 13px; }
+.report-body th, .report-body td { padding: 4px 9px; text-align: left; vertical-align: top; border: 1px solid var(--line-strong); }
+.report-body th { background: var(--panel-soft); }
+.report-body pre { padding: 10px 12px; overflow-x: auto; font-size: 12.5px; background: var(--panel-soft); border-radius: var(--radius); }
+.report-body pre code { padding: 0; background: none; }
+.report-body blockquote { margin-left: 0; margin-right: 0; padding-left: 12px; color: var(--muted); border-left: 3px solid var(--line-strong); }
+.report-raw { white-space: pre-wrap; }
+.mermaid-figure { padding: 8px; overflow-x: auto; background: var(--panel-soft); border-radius: var(--radius); }
+.mermaid-figure svg { max-width: 100%; height: auto; }
+.settings-body textarea { font-family: var(--font-mono); font-size: 12.5px; resize: vertical; }
 
 /* ── overlays ─────────────────────────────────────────────────────────── */
 
