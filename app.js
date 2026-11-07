@@ -1598,8 +1598,8 @@ async function perform(label, run) {
 
 /* Comments and branch updates are visible to others, so they wait ACTION_DELAY
    behind an undo bar before being sent. */
-function defer(label, run) {
-  const item = { id: (state.seq += 1), label };
+function defer(label, run, onUndo = null) {
+  const item = { id: (state.seq += 1), label, onUndo };
   item.timer = setTimeout(() => {
     state.pending = state.pending.filter((entry) => entry !== item);
     render();
@@ -1613,6 +1613,7 @@ function undoPending() {
   const item = state.pending.pop();
   if (!item) return;
   clearTimeout(item.timer);
+  item.onUndo?.();
   toast(`Cancelled: ${item.label}`);
 }
 
@@ -1621,6 +1622,88 @@ function postComment(pr, body) {
     await rest("POST", `/repos/${pr.repo}/issues/${pr.number}/comments`, { body });
     refreshSoon(pr.key);
   });
+}
+
+/* Free-text comments. The detail pane is rebuilt on every refresh, so each PR keeps one
+   <textarea> that is put back in place (value, caret and focus survive); drafts are also
+   saved, so switching PRs or reloading loses nothing. */
+const commentBoxes = new Map();   // pin key -> <textarea>
+
+function loadDrafts() {
+  const drafts = store.get(scopedKey("drafts"), {});
+  return drafts && typeof drafts === "object" ? drafts : {};
+}
+
+function saveDraft(key, text) {
+  const drafts = loadDrafts();
+  if (text.trim()) drafts[key] = text;
+  else delete drafts[key];
+  store.set(scopedKey("drafts"), drafts);
+}
+
+function commentBox(pr) {
+  let box = commentBoxes.get(pr.key);
+  if (box) return box;
+  box = el("textarea", {
+    class: "comment-input",
+    rows: 3,
+    placeholder: "Comment as you · Markdown · ⌘/Ctrl+Enter sends",
+    "aria-label": `Comment on ${shortRef(pr.repo, pr.number)}`,
+    oninput: () => saveDraft(pr.key, box.value),
+    // An IME composition must not be cut short by a re-render (see flushRender).
+    oncompositionstart: () => {
+      composing = true;
+    },
+    oncompositionend: () => {
+      composing = false;
+      if (renderSkipped) render();
+    },
+    onkeydown: (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+        event.preventDefault();
+        sendComment(pr.key);
+      } else if (event.key === "Escape") {
+        box.blur();
+      }
+    }
+  });
+  box.value = loadDrafts()[pr.key] || "";
+  commentBoxes.set(pr.key, box);
+  return box;
+}
+
+function focusComment() {
+  const pr = cursorPR();
+  if (!pr) return;
+  render();
+  requestAnimationFrame(() => document.querySelector("#detail .comment-input")?.focus());
+}
+
+/* Sent after the usual undo delay; Undo or a failed request puts the text back. */
+function sendComment(key) {
+  const pr = state.data.get(key);
+  const box = commentBoxes.get(key);
+  const body = box?.value.trim();
+  if (!pr || !body) return;
+  const restore = () => {
+    if (box.value.trim()) return;   // the user has started a new comment meanwhile
+    box.value = body;
+    saveDraft(key, body);
+    render();
+  };
+  box.value = "";
+  saveDraft(key, "");
+  box.blur();   // so z (undo) works at once
+  const preview = body.replace(/\s+/g, " ");
+  defer(`Comment “${preview.length > 40 ? `${preview.slice(0, 40)}…` : preview}” → ${shortRef(pr.repo, pr.number)}`, async () => {
+    try {
+      await rest("POST", `/repos/${pr.repo}/issues/${pr.number}/comments`, { body });
+    } catch (error) {
+      restore();
+      throw error;
+    }
+    refreshSoon(pr.key);
+  }, restore);
 }
 
 function closedNotice(pr) {
@@ -1768,6 +1851,7 @@ let pointerHeld = false;
 let dragKey = null;
 let renderSkipped = false;      // a render was requested while it was unsafe to swap the DOM
 let scrollAfterRender = false;
+let composing = false;          // an IME composition is in progress in a comment box
 
 function selectingText() {
   const selection = window.getSelection();
@@ -1789,7 +1873,7 @@ function keepFocus(container, build) {
 function flushRender() {
   // Replacing nodes mid-press would swallow the click, mid-drag would cancel it,
   // and mid-selection would throw away what the user is trying to copy.
-  if (pointerHeld || dragKey || selectingText()) {
+  if (pointerHeld || dragKey || composing || selectingText()) {
     renderSkipped = true;
     return;
   }
@@ -2369,7 +2453,7 @@ function renderDetail(index) {
     ]));
   }
 
-  const comments = [];
+  const comments = [commentPanel(pr)];
   if (pr.comments.length) {
     const section = panel("Latest comments", [el("div", { class: "comment-list" }, pr.comments.slice().reverse().map((comment) => el("a", { class: "comment", href: comment.url, target: "_blank", rel: "noopener" }, [
       el("span", { class: "comment-head", text: `${comment.login} · ${ago(comment.at)} ago` }),
@@ -2392,6 +2476,16 @@ function renderDetail(index) {
   detail.replaceChildren(...blocks);
   detail.scrollTop = scrollTop;
   detail.dataset.key = pin.key;
+}
+
+function commentPanel(pr) {
+  return panel("Comment", [
+    commentBox(pr),
+    el("div", { class: "btn-row" }, [
+      el("button", { class: "btn primary", onclick: () => sendComment(pr.key), text: "Comment" }),
+      el("span", { class: "muted small", text: "Sent as you after 3 seconds; z undoes it." })
+    ])
+  ]);
 }
 
 function panel(title, children) {
@@ -2537,6 +2631,42 @@ function sanitizeReport(html) {
   };
   clean(doc.body);
   return doc.body;
+}
+
+/* `path:123` or `path:12-34` in a report, and §9's "`path` line 123", link to that line: in
+   the PR's diff when the report covers the head commit, else in the file at the reviewed commit. */
+const CODE_PATH = /^[\w.@+-]+(?:\/[\w.@+-]+)*$/;
+
+async function linkCodeRefs(container, pr, meta) {
+  const sha = String(meta.head_sha || "").toLowerCase();
+  const current = /^[0-9a-f]{7,40}$/.test(sha) && pr.headOid.toLowerCase().startsWith(sha);
+  const commit = current ? pr.headOid : /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  for (const code of [...container.querySelectorAll("code")]) {
+    if (code.closest("a, pre")) continue;
+    const text = code.textContent.trim();
+    let [, path, line, end] = text.match(/^(.+?):(\d+)(?:[-–](\d+))?$/) || [];
+    if (!path) {
+      const after = code.nextSibling?.nodeType === Node.TEXT_NODE ? code.nextSibling.textContent : "";
+      [path, line] = [text, after.match(/^\s+line\s+(\d+)/i)?.[1]];
+    }
+    if (!line || !CODE_PATH.test(path) || !/[./]/.test(path)) continue;
+    let href = null;
+    if (current && pr.url && window.crypto?.subtle) {
+      href = `${pr.url}/files#diff-${await sha256Hex(path)}R${line}${end ? `-R${end}` : ""}`;
+    } else if (commit) {
+      href = `https://github.com/${pr.repo}/blob/${commit}/${path.split("/").map(encodeURIComponent).join("/")}#L${line}${end ? `-L${end}` : ""}`;
+    }
+    if (!href) continue;
+    const link = el("a", { class: "code-ref", href, target: "_blank", rel: "noopener noreferrer", title: current ? "Open this line in the PR's diff" : "Open this line at the reviewed commit" });
+    code.replaceWith(link);
+    link.append(code);
+  }
+}
+
+/* GitHub's diff anchors are the SHA-256 of the file path. */
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /* Mermaid.js comes from the CDN only when a report has a diagram; without it the source stays. */
@@ -2695,6 +2825,7 @@ function signOut(message = "") {
   state.status.clear();
   state.reports.clear();
   state.reportBlobs.clear();
+  commentBoxes.clear();
   shellMode = null;
   render();
 }
@@ -3215,6 +3346,7 @@ const HELP = [
   ["c", "/ci run (offers update-then-run when behind)"],
   ["r / shift+x", "/ci retry / /ci cancel"],
   ["l", "add or remove any label"],
+  ["shift+c", "write a comment (⌘/Ctrl+Enter sends, Esc leaves the box)"],
   ["y / v", "toggle ready / verified"],
   ["shift+a", "approve"],
   ["shift+m", "merge or auto-merge"],
@@ -3264,6 +3396,7 @@ function openReport(pr = cursorPR(), report = pr && reportsFor(pr)[0]) {
       if (blob.html) {
         show(...sanitizeReport(blob.html).childNodes);
         drawMermaid(body);
+        linkCodeRefs(body, pr, blob.meta);
       } else if (blob.htmlError) {
         show(
           el("p", { class: "t-warn small", text: `GitHub could not render the report (${blob.htmlError}), so this is the Markdown source.` }),
@@ -3318,6 +3451,7 @@ const KEYS = {
   r: () => ciCommand("retry"),
   X: () => ciCommand("cancel"),
   l: () => openLabels(),
+  C: focusComment,
   y: () => quickLabel(0),
   v: () => quickLabel(1),
   A: () => approve(),
