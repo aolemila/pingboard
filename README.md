@@ -59,6 +59,8 @@ skill: pr-review
 
 The detail pane's **AI review** panel shows the verdict, when it was reviewed, and §1 of the report as a summary. When `head_sha` is not the PR's current head it says **PR has new commits since this review** with both short SHAs, and the row's **AI** chip says *stale*. Reports without front matter still get a verdict from their "结论 (Verdict)" section.
 
+File references in a report (`path:123`, `path:12-34`, and §9's "`path` line 123") link to that line: in the PR's diff when the report covers the head commit, otherwise in the file at the reviewed commit.
+
 **View full report** (or `i`) renders the whole report through GitHub's `/markdown` endpoint, so tables, code and `#123` links look as they do on GitHub. The HTML is filtered with `DOMParser` before it is shown: no scripts, styles, event handlers or non-web links. Mermaid diagrams are drawn by Mermaid.js, loaded from jsDelivr (pinned version and SRI hash) only when a report has one; if it cannot load, the diagram stays as source. All of this uses REST quota, not the GraphQL quota the PR refresh uses.
 
 ## Related or unrelated failures
@@ -74,7 +76,8 @@ A job with either kind of evidence is listed as "likely unrelated". Everything e
 
 Everything is done as you, with your token.
 
-- **Comments** (`/ci run`, `/ci retry`, `/ci cancel`) and **branch updates** wait three seconds behind an Undo bar before they are sent.
+- **Comment** on a PR from the box at the bottom of the detail pane (`shift+c` focuses it, ⌘/Ctrl+Enter sends). Drafts are kept per PR across refreshes, PR switches and reloads; Undo or a failed send puts the text back.
+- **Comments** (your own, and `/ci run`, `/ci retry`, `/ci cancel`) and **branch updates** wait three seconds behind an Undo bar before they are sent.
 - **Update branch & run CI** merges the base branch in, waits for the new commit, then posts `/ci run`.
 - **Approve** and **Merge** ask for confirmation. **Labels** apply immediately.
 
