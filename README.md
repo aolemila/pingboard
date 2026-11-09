@@ -80,6 +80,10 @@ Everything is done as you, with your token.
 
 Keyboard shortcuts exist for all of it; press `?` for the list.
 
+## A mock review skill
+
+`.claude/skills/pr-review-mock` is a Claude Code skill that stands in for a real review skill. It fetches a PR with `gh`, writes a report in the format the AI review panel reads (front matter, summary, Mermaid diagram, issue list, verdict, English comments) and publishes it to the repository's `ai-reviews` branch. Files, line numbers, head SHA and CI come from the PR; the review text is a template, and the verdict is whatever you ask for. Ask Claude Code, in this folder, to review `owner/repo#N`.
+
 ## Token
 
 Pingboard takes a **classic** personal access token with the `repo` scope (`public_repo` is enough for public repositories). It is sent only from your browser to `api.github.com`, and is kept in `sessionStorage` — or `localStorage` if you tick "Keep token after closing this tab". The board itself (pins, groups, preferences) lives in `localStorage` per GitHub login, so it belongs to one browser and one address. Settings has **Export board + settings** and **Import board + settings** buttons to back it up or move it. The backup never includes the GitHub token.
