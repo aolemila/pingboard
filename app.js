@@ -39,6 +39,21 @@ const RATE_FLOOR = 150;             // stop background polling below this many p
 const GROUP_SEARCH_MS = 5 * 60 * 1000;
 const UNPIN_CLOSED_MS = 24 * 60 * 60 * 1000;
 const DISMISSED_MAX = 200;          // unpinned search results remembered per group
+const THEME_KEY = "pingboard.theme";  // last theme, so the sign-in screen matches before a user is known
+
+/* The Appearance choices GitHub offers; "system" follows the OS light/dark setting. */
+const THEMES = [
+  { id: "system", label: "Sync with system" },
+  { id: "light", label: "Light default" },
+  { id: "light-high-contrast", label: "Light high contrast" },
+  { id: "light-colorblind", label: "Light Protanopia & Deuteranopia" },
+  { id: "light-tritanopia", label: "Light Tritanopia" },
+  { id: "dark", label: "Dark default" },
+  { id: "dark-dimmed", label: "Dark dimmed" },
+  { id: "dark-high-contrast", label: "Dark high contrast" },
+  { id: "dark-colorblind", label: "Dark Protanopia & Deuteranopia" },
+  { id: "dark-tritanopia", label: "Dark Tritanopia" }
+];
 
 /* Per-repo workflow knowledge. Anything not listed gets GENERIC_PROFILE. */
 const REPO_PROFILES = {
@@ -126,6 +141,25 @@ function el(tag, props = {}, children = []) {
   return node;
 }
 
+function applyTheme(id) {
+  const theme = THEMES.some((item) => item.id === id) ? id : "system";
+  if (theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+    /* private mode: the theme still applies to this page */
+  }
+}
+
+function savedTheme() {
+  try {
+    return localStorage.getItem(THEME_KEY);
+  } catch {
+    return null;
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -188,7 +222,7 @@ const state = {
   authError: "",
 
   board: { groups: [], pins: [] },   // groups: [{id, name, collapsed, query?, dismissed?}]; pins: [{key, repo, number, group, addedAt, seen, seenActivity, via}]
-  prefs: { interval: 60, notify: false, defaultRepo: DEFAULT_REPO, boardWidth: BOARD_WIDTH, following: [], repoProfiles: {}, sort: "manual", filter: "all", owner: "all", unpinClosed: false },
+  prefs: { interval: 60, notify: false, defaultRepo: DEFAULT_REPO, boardWidth: BOARD_WIDTH, following: [], repoProfiles: {}, sort: "manual", filter: "all", owner: "all", unpinClosed: false, theme: "system" },
 
   data: new Map(),        // pin key -> PR model
   status: new Map(),      // pin key -> {at, loading, error}
@@ -223,12 +257,14 @@ function normalizePrefs(raw) {
     sort: SORTS.some((sort) => sort.id === prefs.sort) ? prefs.sort : "manual",
     filter: FILTERS.some((filter) => filter.id === prefs.filter) ? prefs.filter : "all",
     owner: OWNERS.some((owner) => owner.id === prefs.owner) ? prefs.owner : "all",
-    unpinClosed: Boolean(prefs.unpinClosed)
+    unpinClosed: Boolean(prefs.unpinClosed),
+    theme: THEMES.some((theme) => theme.id === prefs.theme) ? prefs.theme : "system"
   };
 }
 
 function loadUserState() {
   state.prefs = normalizePrefs(store.get(scopedKey("prefs"), {}));
+  applyTheme(state.prefs.theme);
 
   state.board = cleanBoard(store.get(scopedKey("board"), null)) || { groups: [{ id: "g1", name: "Tracking", collapsed: false }], pins: [] };
   state.cursor = null;
@@ -325,6 +361,7 @@ async function importBoard(file) {
     state.prefs = prefs;
     persistPrefs();
     applyBoardWidth();
+    applyTheme(prefs.theme);
   };
   openChoice({
     title: `Import ${count}?`,
@@ -2319,6 +2356,7 @@ function signOut(message = "") {
 /* ── 9. modals ─────────────────────────────────────────────────────────── */
 
 function closeModal() {
+  state.modal?.onClose?.();
   state.modal = null;
   document.querySelector("#modal")?.replaceChildren();
   render();
@@ -2326,6 +2364,7 @@ function closeModal() {
 
 function mountModal(modal, node) {
   document.activeElement?.blur();
+  if (state.modal && state.modal !== modal) state.modal.onClose?.();   // e.g. a confirmation opened from Settings
   state.modal = modal;
   document.querySelector("#modal").replaceChildren(el("div", {
     class: "scrim",
@@ -2661,6 +2700,7 @@ function openSettings() {
   const quickLabels = el("input", { type: "text", spellcheck: "false", placeholder: "ready, verified" });
   const mergeMethod = el("select", {}, ["merge", "rebase", "squash"].map((method) => el("option", { value: method, text: method })));
   const interval = el("select", {}, [30, 60, 120, 300].map((seconds) => el("option", { value: seconds, selected: seconds === state.prefs.interval, text: seconds < 60 ? `${seconds} seconds` : `${seconds / 60} minute${seconds > 60 ? "s" : ""}` })));
+  const theme = el("select", { onchange: () => applyTheme(theme.value) }, THEMES.map((item) => el("option", { value: item.id, selected: item.id === state.prefs.theme, text: item.label })));
   const notify = el("input", { type: "checkbox", checked: state.prefs.notify });
   const unpinClosed = el("input", { type: "checkbox", checked: state.prefs.unpinClosed });
   const following = el("input", { type: "text", value: state.prefs.following.join(" "), placeholder: "usernames, separated by spaces", spellcheck: "false", onkeydown: (event) => event.key === "Enter" && save() });
@@ -2723,6 +2763,7 @@ function openSettings() {
     state.prefs.interval = Number(interval.value);
     state.prefs.notify = notify.checked;
     state.prefs.unpinClosed = unpinClosed.checked;
+    state.prefs.theme = theme.value;
     state.prefs.following = parseLogins(following.value);
     state.prefs.repoProfiles = {
       ...state.prefs.repoProfiles,
@@ -2742,7 +2783,7 @@ function openSettings() {
     closeModal();
   };
   loadProfile();
-  mountModal({}, el("div", { class: "modal settings-modal" }, [
+  mountModal({ onClose: () => applyTheme(state.prefs.theme) }, el("div", { class: "modal settings-modal" }, [
     el("div", { class: "settings-body" }, [
       el("h2", { text: `Settings · ${state.user.login}` }),
       el("label", { class: "field" }, ["Default repository", repoInput]),
@@ -2762,6 +2803,7 @@ function openSettings() {
       ]),
       el("label", { class: "field" }, ["Quick labels · comma-separated", quickLabels]),
       el("label", { class: "field" }, ["Merge method", mergeMethod]),
+      el("label", { class: "field" }, ["Theme · previews as you choose", theme]),
       el("label", { class: "field" }, ["Refresh open PRs every", interval]),
       el("label", { class: "check-row" }, [notify, "Browser notification when CI finishes"]),
       el("label", { class: "check-row" }, [unpinClosed, "Unpin merged/closed PRs after a day"]),
@@ -2923,6 +2965,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 setInterval(tick, TICK_MS);
+applyTheme(savedTheme());
 
 if (state.token) connect();
 else render();
