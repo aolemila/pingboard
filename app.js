@@ -1108,19 +1108,25 @@ async function loadLabels(repo) {
    the board lists that directory, maps file names back to PR numbers, and reads a
    report (by its blob SHA, so each version is downloaded once) when its PR is opened. */
 
-/* "owner/repo = reports-owner/reports-repo@branch:dir/pr-{number}-review.md" — where the
-   reports for owner/repo's PRs live. The branch is optional (the default branch). */
+/* "github:owner/repo = reports-owner/reports-repo@branch:dir/pr-{number}-review.md" or
+   "gitlab:group/project = …" — where the reports for that repository's PRs or merge requests
+   live. GitHub and GitLab are named the same way; a bare "owner/repo" (lines saved before the
+   prefix existed) means GitHub. The reports repository is on GitHub; the branch is optional. */
 function parseReportSource(line) {
-  const match = String(line).trim().match(/^(gl:[\w.-]+(?:\/[\w.-]+)+|[\w.-]+\/[\w.-]+)\s*=\s*([\w.-]+\/[\w.-]+)(?:@([^\s:]+))?:\/*(\S+)$/);
+  const match = String(line).trim().match(/^(?:(github|gitlab|gl):)?([\w.-]+(?:\/[\w.-]+)+)\s*=\s*([\w.-]+\/[\w.-]+)(?:@([^\s:]+))?:\/*(\S+)$/);
   if (!match) return null;
-  const [, repo, source, ref = "", template] = match;
+  const [, prefix = "", path, source, ref = "", template] = match;
+  const host = prefix === "gitlab" || prefix === "gl" ? "gitlab" : "github";
+  if (host === "github" && path.split("/").length !== 2) return null;   // GitHub repositories are owner/repo
+  const repo = host === "gitlab" ? `gl:${path}` : path;
+  const side = host === "gitlab" ? `gitlab:${path}` : `${prefix ? "github:" : ""}${path}`;
   const slash = template.lastIndexOf("/");
   const dir = slash === -1 ? "" : template.slice(0, slash);
   const parts = template.slice(slash + 1).split("{number}");
   if (parts.length !== 2 || dir.includes("{number}")) return null;
   return {
-    line: `${repo} = ${source}${ref ? `@${ref}` : ""}:${template}`,
-    repo, source, ref, dir,
+    line: `${side} = ${source}${ref ? `@${ref}` : ""}:${template}`,
+    host, repo, source, ref, dir,
     pattern: new RegExp(`^${parts.map(escapeRegExp).join("(\\d+)")}$`)
   };
 }
@@ -1404,7 +1410,7 @@ async function syncGroup(id) {
   const query = group.query;
   state.searches.set(id, { ...status, loading: true });
   try {
-    const result = query.startsWith("gitlab:") ? await searchGitlab(query) : await searchGithub(query);
+    const result = query.startsWith("gitlab:") ? await searchGitlab(query) : await searchGithub(query.replace(/^github:\s*/, ""));
     const current = state.board.groups.find((item) => item.id === id);   // another tab may have replaced the board
     if (current?.query !== query) {
       state.searches.delete(id);
@@ -1598,14 +1604,15 @@ function renameGroup(group) {
 function editGroupSearch(group) {
   openPrompt({
     title: `Sync "${group.name}" with a search`,
-    hint: "New open pull requests it finds are pinned here; ones it pinned leave when they stop matching. Leave blank to stop. GitLab: gitlab: reviewer_username=@me (any merge request list filter, key=value).",
+    hint: "New open pull requests it finds are pinned here; ones it pinned leave when they stop matching. Leave blank to stop. GitHub: github: review-requested:@me (GitHub search syntax; the prefix is optional). GitLab: gitlab: reviewer_username=@me (any merge request list filter, key=value).",
     value: group.query || "",
     placeholder: "e.g. review-requested:@me label:ready",
     submit: "Save",
     allowEmpty: true,
     onSubmit(text) {
       // Scoped to the default repository like Add PRs, unless it names its own scope.
-      const query = !text || /^gitlab:/.test(text) || /(^|\s)(repo|org|user):/.test(text) ? text : `repo:${state.prefs.defaultRepo} ${text}`;
+      const github = text.replace(/^github:\s*/, "");
+      const query = !text || /^gitlab:/.test(text) || /(^|\s)(repo|org|user):/.test(github) ? text : `${text === github ? "" : "github: "}repo:${state.prefs.defaultRepo} ${github}`;
       if (query) Object.assign(group, { query, dismissed: group.dismissed || [] });
       else {
         delete group.query;
@@ -2783,10 +2790,12 @@ function reportCard(pr, report, named) {
   if (blob.error) return el("div", { class: "report t-bad", text: `Could not read ${report.file.path}: ${blob.error}` });
   const freshness = reportFreshness(pr, blob.meta);
   const otherPr = blob.meta.pr && Number(blob.meta.pr) !== pr.number;
+  const otherHost = /^(github|gitlab)$/.test(blob.meta.host || "") && blob.meta.host !== (isGitlab(pr.repo) ? "gitlab" : "github");
   return el("div", { class: "report" }, [
     el("div", { class: "report-line" }, reportFacts(blob, named ? report.source : null)),
     el("div", { class: freshness.className, text: freshness.text }),
-    otherPr ? el("div", { class: "t-warn small", text: `The report says it is for #${blob.meta.pr}.` }) : null,
+    otherPr ? el("div", { class: "t-warn small", text: `The report says it is for ${isGitlab(pr.repo) ? "!" : "#"}${blob.meta.pr}.` }) : null,
+    otherHost ? el("div", { class: "t-warn small", text: `The report says it reviewed a ${blob.meta.host === "gitlab" ? "GitLab merge request" : "GitHub pull request"}.` }) : null,
     blob.summary ? el("div", { class: "report-summary", text: blob.summary }) : null,
     el("div", { class: "btn-row" }, [
       el("button", { class: "btn", title: "Shortcut: i", onclick: () => openReport(pr, report), text: "View full report" }),
@@ -3427,7 +3436,7 @@ function openSettings() {
   const notify = el("input", { type: "checkbox", checked: state.prefs.notify });
   const unpinClosed = el("input", { type: "checkbox", checked: state.prefs.unpinClosed });
   const following = el("input", { type: "text", value: state.prefs.following.join(" "), placeholder: "usernames, separated by spaces", spellcheck: "false", onkeydown: (event) => event.key === "Enter" && save() });
-  const reportSourcesInput = el("textarea", { rows: 3, spellcheck: "false", placeholder: "owner/repo = reports-owner/reports-repo@branch:reviews/pr-{number}-review.md" });
+  const reportSourcesInput = el("textarea", { rows: 3, spellcheck: "false", placeholder: "github:owner/repo = reports-owner/reports-repo:reports/github/owner/repo/pr-{number}-review.md\ngitlab:group/project = reports-owner/reports-repo:reports/gitlab/group/project/pr-{number}-review.md" });
   reportSourcesInput.value = state.prefs.reportSources.join("\n");
   const gitlabUrl = el("input", { type: "text", value: state.prefs.gitlabUrl, spellcheck: "false", placeholder: "https://gitlab.example.com" });
   const gitlabToken = el("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: state.gitlabToken ? "saved · type a new one to replace it" : "glpat-…" });
@@ -3490,7 +3499,7 @@ function openSettings() {
     if (!/^[\w.-]+\/[\w.-]+$/.test(profileRepo)) return toast("Workflow repository must look like owner/name", "error");
     const sourceLines = reportSourcesInput.value.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
     const badSource = sourceLines.find((line) => !parseReportSource(line));
-    if (badSource) return toast(`Report source must look like owner/repo = owner/reports@branch:dir/pr-{number}.md: ${badSource}`, "error");
+    if (badSource) return toast(`Report source must look like github:owner/repo = owner/reports@branch:dir/pr-{number}.md (gitlab:group/project for GitLab): ${badSource}`, "error");
     const glUrl = normalizeGitlabUrl(gitlabUrl.value);
     if (gitlabUrl.value.trim() && !glUrl) return toast("GitLab URL must look like https://gitlab.example.com", "error");
     if (glUrl && !gitlabToken.value.trim() && !state.gitlabToken) return toast("Add a GitLab personal access token (scope api)", "error");
@@ -3567,7 +3576,7 @@ function openSettings() {
       el("p", { class: "muted small", text: `${gitlabStatus} Pin a merge request by pasting its URL or group/project!123; sync a group with gitlab: reviewer_username=@me. The token stays in this browser, like the GitHub token, and is sent only to this GitLab.` }),
       el("label", { class: "field" }, ["AI review reports · one source per line", reportSourcesInput]),
       el("p", { class: "muted small" }, [
-        "For PRs in ", el("code", { text: "owner/repo" }), ", read reports from a directory in another repository; ",
+        "For PRs in ", el("code", { text: "github:owner/repo" }), " or merge requests in ", el("code", { text: "gitlab:group/project" }), ", read reports from a directory in a GitHub repository; ",
         el("code", { text: "{number}" }), " in the file name is the PR number, and ", el("code", { text: "@branch" }), " is optional. Directories are re-listed every 10 minutes and on Refresh."
       ]),
       el("p", { class: "muted small", text: `Your board is saved in this browser for ${location.host}. Export it to move it to another browser or address, or to keep a copy.` })

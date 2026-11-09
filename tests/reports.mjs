@@ -188,12 +188,19 @@ console.log("\nparsing (in the page)");
       line: source.line,
       matches: ["pr-12-review.md", "pr-x-review.md", "xpr-12-review.md"].map((name) => name.match(source.pattern)?.[1] ?? null),
       noBranch: parseReportSource("a/b = c/d:pr-{number}.md")?.ref,
+      hosts: ["github:a/b = c/d:r/github/a/b/pr-{number}.md", "a/b = c/d:r/pr-{number}.md", "gitlab:g/sub/p = c/d:r/gitlab/g/sub/p/pr-{number}.md", "gl:g/p = c/d:r/pr-{number}.md"]
+        .map((line) => { const s = parseReportSource(line); return [s.host, s.repo, s.line.split(" = ")[0]]; }),
+      githubNeedsOwnerRepo: parseReportSource("github:a/b/c = c/d:pr-{number}.md"),
       rejected: ["a/b", "a/b = c/d:reviews/", "a/b = c/d:{number}/x-{number}.md", "a/b = c/d:pr.md"].map((line) => parseReportSource(line))
     };
   });
   check("normalizes the source line", parsed.line, "a/b = c/d@main:reviews/pr-{number}-review.md");
   check("file names map back to PR numbers", parsed.matches, ["12", null, null]);
   check("the branch is optional", parsed.noBranch, "");
+  check("github: and gitlab: name the host; bare owner/repo is GitHub; gl: still reads as GitLab", parsed.hosts, [
+    ["github", "a/b", "github:a/b"], ["github", "a/b", "a/b"], ["gitlab", "gl:g/sub/p", "gitlab:g/sub/p"], ["gitlab", "gl:g/p", "gitlab:g/p"]
+  ]);
+  check("a GitHub repository is owner/repo", parsed.githubNeedsOwnerRepo, null);
   check("malformed sources are rejected", parsed.rejected, [null, null, null, null]);
   await context.close();
 }

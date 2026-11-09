@@ -20,7 +20,7 @@ const PROJECT = "ai-infra/tpu-infer-loop";
 const ENCODED = encodeURIComponent(PROJECT);
 const REPO = `gl:${PROJECT}`;
 const HEAD = { 7: "7".repeat(40), 8: "8".repeat(40) };
-const SOURCE = `${REPO} = acme/reviews:reviews/mr-{number}-review.md`;
+const SOURCE = `gitlab:${PROJECT} = acme/reviews:reviews/mr-{number}-review.md`;
 
 const at = process.argv.indexOf("--head");
 if (at === -1) throw new Error("usage: bun gitlab.mjs --head <dir>");

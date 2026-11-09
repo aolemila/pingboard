@@ -36,18 +36,20 @@ Press `i` to open the selected PR's AI review report (see below).
 
 ## AI review reports
 
-A review skill run by an agent (Claude Code, say) writes one Markdown report per PR and pushes it to a GitHub repository. Pingboard reads those reports and shows them next to the PR. List where they live in Settings, one source per line:
+A review skill run by an agent (Claude Code, say) writes one Markdown report per PR or merge request and pushes it to a GitHub repository. Pingboard reads those reports and shows them next to the PR. List where they live in Settings, one source per line:
 
 ```
-owner/repo = reports-owner/reports-repo@branch:reviews/pr-{number}-review.md
+github:owner/repo = reports-owner/reports-repo@branch:reports/github/owner/repo/pr-{number}-review.md
+gitlab:group/project = reports-owner/reports-repo@branch:reports/gitlab/group/project/pr-{number}-review.md
 ```
 
-The left side is the repository whose PRs are reviewed; the right side is where the reports are, with an optional branch and a file name template. Every 10 minutes (or on **Refresh**) Pingboard lists that directory and maps file names back to PR numbers. A report is read when its PR is opened, and read again only when its blob SHA changes.
+The left side names the host and the repository whose PRs (or merge requests) are reviewed; GitHub and GitLab are written the same way, and a line without a prefix means GitHub. The right side is where the reports are, with an optional branch and a file name template. Keeping a `github/` and a `gitlab/` directory in the reports repository means `primatrix/x` on GitHub and `primatrix/x` on GitLab never share a folder. Every 10 minutes (or on **Refresh**) Pingboard lists that directory and maps file names back to PR numbers. A report is read when its PR is opened, and read again only when its blob SHA changes.
 
 Reports start with front matter written by the skill:
 
 ```
 ---
+host: github              # github | gitlab
 pr: 123
 repo: owner/repo
 head_sha: <full SHA of the PR head that was reviewed>
