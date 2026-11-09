@@ -36,18 +36,20 @@ Press `i` to open the selected PR's AI review report (see below).
 
 ## AI review reports
 
-A review skill run by an agent (Claude Code, say) writes one Markdown report per PR and pushes it to a GitHub repository. Pingboard reads those reports and shows them next to the PR. List where they live in Settings, one source per line:
+A review skill run by an agent (Claude Code, say) writes one Markdown report per PR or merge request and pushes it to a GitHub repository. Pingboard reads those reports and shows them next to the PR. List where they live in Settings, one source per line:
 
 ```
-owner/repo = reports-owner/reports-repo@branch:reviews/pr-{number}-review.md
+github:owner/repo = reports-owner/reports-repo@branch:reports/github/owner/repo/pr-{number}-review.md
+gitlab:group/project = reports-owner/reports-repo@branch:reports/gitlab/group/project/pr-{number}-review.md
 ```
 
-The left side is the repository whose PRs are reviewed; the right side is where the reports are, with an optional branch and a file name template. Every 10 minutes (or on **Refresh**) Pingboard lists that directory and maps file names back to PR numbers. A report is read when its PR is opened, and read again only when its blob SHA changes.
+The left side names the host and the repository whose PRs (or merge requests) are reviewed; GitHub and GitLab are written the same way, and a line without a prefix means GitHub. The right side is where the reports are, with an optional branch and a file name template. Keeping a `github/` and a `gitlab/` directory in the reports repository means `primatrix/x` on GitHub and `primatrix/x` on GitLab never share a folder. Every 10 minutes (or on **Refresh**) Pingboard lists that directory and maps file names back to PR numbers. A report is read when its PR is opened, and read again only when its blob SHA changes.
 
 Reports start with front matter written by the skill:
 
 ```
 ---
+host: github              # github | gitlab
 pr: 123
 repo: owner/repo
 head_sha: <full SHA of the PR head that was reviewed>
@@ -98,6 +100,16 @@ Open PRs refresh every 60 seconds by default (configurable), background tabs fiv
 ## Other repositories
 
 `owner/repo#123` or a URL pins a PR from anywhere. The Settings button also lets you configure a repository's workflow directly in the browser: which checks count as CI, the gating pipeline, comment commands, quick labels, and merge method. Profiles are selectable from a dropdown and can be deleted; deleting a built-in profile override restores its built-in defaults. These overrides are cached in `localStorage` with the rest of that GitHub user's preferences, so they work on the published site and survive reloads. Built-in defaults live in `REPO_PROFILES` at the top of `app.js`; repositories without a saved or built-in profile start with every check treated as CI and no CI commands.
+
+## GitLab merge requests
+
+Settings → **GitLab** takes the instance URL (e.g. `https://gitlab.example.com`) and a personal access token with the `api` scope. The token is stored like the GitHub one, only in this browser, and is sent only to that GitLab instance. The instance must allow cross-origin requests from the board's address.
+
+Paste a merge request URL or `group/project!123` into **+ Add PRs** to pin it. A merge request shows its state, the head pipeline's jobs as CI, conflicts, approvals, labels, the latest notes (inline ones say which line), and the AI review report if a source is configured for `gl:group/project`. **Your review requested** means you are one of its reviewers. The comment box posts a note on the merge request.
+
+To pin merge requests automatically, give a group a **Sync search** starting with `gitlab:` followed by filters of GitLab's merge request list as `key=value`, e.g. `gitlab: reviewer_username=@me` or `gitlab: project=group/project author_username=someone`. `@me` is the token's user.
+
+CI commands, branch updates, labels, approve and merge are not available for GitLab merge requests; do those on GitLab. Base-branch failure history is not read for GitLab, so only other pinned merge requests count as evidence that a failure is unrelated.
 
 ## Run it
 
