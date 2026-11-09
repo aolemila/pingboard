@@ -578,7 +578,7 @@ a.num:hover { text-decoration: underline; color: var(--text); }
 .comment { display: grid; align-content: start; gap: 1px; padding: 6px 8px; margin: 0 -8px; text-decoration: none; border-radius: 4px; }
 .comment:hover { background: var(--panel-soft); }
 .comment-head { font-size: 12px; color: var(--quiet); }
-.comment-body { font-size: 13px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
+.comment-body { font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
 .comment-input { width: 100%; min-height: 64px; resize: vertical; font-family: var(--font-ui); line-height: 1.45; }
 .report-body a.code-ref { text-decoration: none; }
 .report-body a.code-ref code { text-decoration: underline dotted; text-underline-offset: 3px; }

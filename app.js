@@ -772,7 +772,7 @@ async function toPR(pin, repo, base, { force = false } = {}) {
     labels: pr.labels.nodes,
     reviews: pr.latestOpinionatedReviews.nodes.map((review) => ({ login: review.author?.login || "ghost", state: review.state })),
     reviewRequested: pr.state === "OPEN" && pr.reviewRequests.nodes.some((request) => request.requestedReviewer?.isViewer),
-    comments: pr.comments.nodes.map((comment) => ({ login: comment.author?.login || "ghost", text: comment.bodyText.slice(0, 700), at: comment.createdAt, url: safeUrl(comment.url) })),
+    comments: pr.comments.nodes.map((comment) => ({ login: comment.author?.login || "ghost", text: comment.bodyText.replace(/\n{3,}/g, "\n\n").trim(), at: comment.createdAt, url: safeUrl(comment.url) })),
     activityAt: newestActivity(pr),
     behind: repo.ref?.compare?.behindBy ?? null,
     checks,
