@@ -32,6 +32,35 @@ Selecting a row opens the detail pane: the status with a one-line explanation, t
 
 Settings can also **unpin merged/closed PRs after a day** (off by default); **Clear merged / closed** does it at once.
 
+Press `i` to open the selected PR's AI review report (see below).
+
+## AI review reports
+
+A review skill run by an agent (Claude Code, say) writes one Markdown report per PR and pushes it to a GitHub repository. Pingboard reads those reports and shows them next to the PR. List where they live in Settings, one source per line:
+
+```
+owner/repo = reports-owner/reports-repo@branch:reviews/pr-{number}-review.md
+```
+
+The left side is the repository whose PRs are reviewed; the right side is where the reports are, with an optional branch and a file name template. Every 10 minutes (or on **Refresh**) Pingboard lists that directory and maps file names back to PR numbers. A report is read when its PR is opened, and read again only when its blob SHA changes.
+
+Reports start with front matter written by the skill:
+
+```
+---
+pr: 123
+repo: owner/repo
+head_sha: <full SHA of the PR head that was reviewed>
+verdict: needs-work        # block | needs-work | lgtm
+reviewed_at: 2026-10-24T10:00:00Z
+skill: pr-review
+---
+```
+
+The detail pane's **AI review** panel shows the verdict, when it was reviewed, and §1 of the report as a summary. When `head_sha` is not the PR's current head it says **PR has new commits since this review** with both short SHAs, and the row's **AI** chip says *stale*. Reports without front matter still get a verdict from their "结论 (Verdict)" section.
+
+**View full report** (or `i`) renders the whole report through GitHub's `/markdown` endpoint, so tables, code and `#123` links look as they do on GitHub. The HTML is filtered with `DOMParser` before it is shown: no scripts, styles, event handlers or non-web links. Mermaid diagrams are drawn by Mermaid.js, loaded from jsDelivr (pinned version and SRI hash) only when a report has one; if it cannot load, the diagram stays as source. All of this uses REST quota, not the GraphQL quota the PR refresh uses.
+
 ## Related or unrelated failures
 
 Pingboard does not read logs — Buildkite logs are not reachable from a static page. It sorts failing jobs using what GitHub already knows:

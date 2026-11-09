@@ -7,7 +7,7 @@
      1. constants + utils
      2. state + persistence
      3. github api
-     4. PR model (checks, CI summary, failure evidence)
+     4. PR model (checks, CI summary, failure evidence, AI review reports)
      5. refresh scheduler
      6. board operations (pins, groups, cursor)
      7. actions (comments, update branch, labels, review, merge)
@@ -39,6 +39,14 @@ const RATE_FLOOR = 150;             // stop background polling below this many p
 const GROUP_SEARCH_MS = 5 * 60 * 1000;
 const UNPIN_CLOSED_MS = 24 * 60 * 60 * 1000;
 const DISMISSED_MAX = 200;          // unpinned search results remembered per group
+const REPORTS_TTL_MS = 10 * 60 * 1000;   // report directories are re-listed this often
+const MERMAID_URL = "https://cdn.jsdelivr.net/npm/mermaid@12.2.0/dist/mermaid.min.js";
+const MERMAID_SRI = "sha384-8xUhuLNMjW/cI2Dacg3DR4WliYznvIg0LVG1stctThKD/YVrJFI9TNCFxft5NYgp";
+const VERDICTS = {
+  block: { label: "🔴 BLOCK", short: "BLOCK" },
+  "needs-work": { label: "⚠️ NEEDS WORK", short: "NEEDS WORK" },
+  lgtm: { label: "✅ LGTM", short: "LGTM" }
+};
 const THEME_KEY = "pingboard.theme";  // last theme, so the sign-in screen matches before a user is known
 
 /* The Appearance choices GitHub offers; "system" follows the OS light/dark setting. */
@@ -222,7 +230,7 @@ const state = {
   authError: "",
 
   board: { groups: [], pins: [] },   // groups: [{id, name, collapsed, query?, dismissed?}]; pins: [{key, repo, number, group, addedAt, seen, seenActivity, via}]
-  prefs: { interval: 60, notify: false, defaultRepo: DEFAULT_REPO, boardWidth: BOARD_WIDTH, following: [], repoProfiles: {}, sort: "manual", filter: "all", owner: "all", unpinClosed: false, theme: "system" },
+  prefs: { interval: 60, notify: false, defaultRepo: DEFAULT_REPO, boardWidth: BOARD_WIDTH, following: [], repoProfiles: {}, sort: "manual", filter: "all", owner: "all", unpinClosed: false, theme: "system", reportSources: [] },
 
   data: new Map(),        // pin key -> PR model
   status: new Map(),      // pin key -> {at, loading, error}
@@ -230,6 +238,8 @@ const state = {
   commitFailures: new Map(), // "repo@oid" -> {hasCI, failed: [jobKey]} for finished base commits
   labels: new Map(),      // repo -> {at, items: [{name, color}]}
   searches: new Map(),    // group id -> {at, loading, error, missing: Set(pin key)}
+  reports: new Map(),     // report source line -> {at, loading, error, files: Map(PR number -> {name, path, sha, url})}
+  reportBlobs: new Map(), // "source@blob sha" -> {loading, error, meta, body, verdict, summary, html, htmlError}
 
   cursor: null,
   query: "",
@@ -258,7 +268,8 @@ function normalizePrefs(raw) {
     filter: FILTERS.some((filter) => filter.id === prefs.filter) ? prefs.filter : "all",
     owner: OWNERS.some((owner) => owner.id === prefs.owner) ? prefs.owner : "all",
     unpinClosed: Boolean(prefs.unpinClosed),
-    theme: THEMES.some((theme) => theme.id === prefs.theme) ? prefs.theme : "system"
+    theme: THEMES.some((theme) => theme.id === prefs.theme) ? prefs.theme : "system",
+    reportSources: [...new Set((Array.isArray(prefs.reportSources) ? prefs.reportSources : []).map(parseReportSource).filter(Boolean).map((source) => source.line))]
   };
 }
 
@@ -875,6 +886,168 @@ async function loadLabels(repo) {
   return items;
 }
 
+/* AI review reports: a skill writes one Markdown file per PR into a GitHub repository;
+   the board lists that directory, maps file names back to PR numbers, and reads a
+   report (by its blob SHA, so each version is downloaded once) when its PR is opened. */
+
+/* "owner/repo = reports-owner/reports-repo@branch:dir/pr-{number}-review.md" — where the
+   reports for owner/repo's PRs live. The branch is optional (the default branch). */
+function parseReportSource(line) {
+  const match = String(line).trim().match(/^([\w.-]+\/[\w.-]+)\s*=\s*([\w.-]+\/[\w.-]+)(?:@([^\s:]+))?:\/*(\S+)$/);
+  if (!match) return null;
+  const [, repo, source, ref = "", template] = match;
+  const slash = template.lastIndexOf("/");
+  const dir = slash === -1 ? "" : template.slice(0, slash);
+  const parts = template.slice(slash + 1).split("{number}");
+  if (parts.length !== 2 || dir.includes("{number}")) return null;
+  return {
+    line: `${repo} = ${source}${ref ? `@${ref}` : ""}:${template}`,
+    repo, source, ref, dir,
+    pattern: new RegExp(`^${parts.map(escapeRegExp).join("(\\d+)")}$`)
+  };
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function reportSources() {
+  return state.prefs.reportSources.map(parseReportSource).filter(Boolean);
+}
+
+function blobKey(source, file) {
+  return `${source.source}@${file.sha}`;
+}
+
+/* The reports found for a PR, one per source that has one. */
+function reportsFor(pr) {
+  return reportSources().filter((source) => source.repo === pr.repo).flatMap((source) => {
+    const file = state.reports.get(source.line)?.files.get(pr.number);
+    return file ? [{ source, file, blob: state.reportBlobs.get(blobKey(source, file)) }] : [];
+  });
+}
+
+/* Re-list every source's directory once it is older than REPORTS_TTL_MS (or now, with force). */
+function refreshReports(force = false) {
+  const now = Date.now();
+  for (const source of reportSources()) {
+    const index = state.reports.get(source.line);
+    if (index?.loading || (!force && now - (index?.at || 0) < REPORTS_TTL_MS)) continue;
+    state.reports.set(source.line, { files: new Map(), ...index, loading: true });
+    loadReportIndex(source)
+      .then((files) => state.reports.set(source.line, { at: Date.now(), loading: false, error: "", files }))
+      .catch((error) => state.reports.set(source.line, { files: new Map(), ...index, at: Date.now(), loading: false, error: error.message }))
+      .finally(render);
+  }
+}
+
+async function loadReportIndex(source) {
+  const dir = source.dir.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  const items = await rest("GET", `/repos/${source.source}/contents/${dir}${source.ref ? `?ref=${encodeURIComponent(source.ref)}` : ""}`);
+  const files = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const number = item.type === "file" && item.name.match(source.pattern)?.[1];
+    if (number) files.set(Number(number), { name: item.name, path: item.path, sha: item.sha, url: safeUrl(item.html_url) });
+  }
+  return files;
+}
+
+function loadReport(source, file) {
+  const key = blobKey(source, file);
+  if (state.reportBlobs.has(key)) return;
+  state.reportBlobs.set(key, { loading: true });
+  rest("GET", `/repos/${source.source}/git/blobs/${file.sha}`)
+    .then((blob) => state.reportBlobs.set(key, { loading: false, ...parseReport(decodeBase64(blob.content)) }))
+    .catch((error) => state.reportBlobs.set(key, { loading: false, error: error.message }))
+    .finally(render);
+}
+
+function decodeBase64(text) {
+  return new TextDecoder().decode(Uint8Array.from(atob(text.replace(/\s/g, "")), (char) => char.charCodeAt(0)));
+}
+
+/* Front matter (pr, repo, head_sha, verdict, reviewed_at, skill) as written by the skill.
+   Reports from before it existed still name their verdict in a "结论 (Verdict)" section. */
+function parseReport(text) {
+  const normalized = text.replace(/\r\n?/g, "\n").replace(/^﻿/, "");
+  const front = normalized.match(/^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/);
+  const meta = {};
+  for (const line of front ? front[1].split("\n") : []) {
+    const match = line.match(/^\s*([\w-]+)\s*:\s*(.*?)\s*$/);
+    if (match) meta[match[1]] = match[2].replace(/\s+#.*$/, "").replace(/^(["'])(.*)\1$/, "$2");
+  }
+  const body = front ? normalized.slice(front[0].length) : normalized;
+  const parts = markdownSections(body);
+  const verdictAt = parts.findIndex((part) => /结论|verdict/i.test(part.title));
+  return {
+    meta,
+    body,
+    verdict: findVerdict(meta.verdict) || (verdictAt === -1 ? null : findVerdict(`${parts[verdictAt].title}\n${sectionText(parts, verdictAt)}`)),
+    summary: reportSummary(parts)
+  };
+}
+
+const VERDICT_PATTERNS = [["block", /🔴|\bblock\b/i], ["needs-work", /⚠|needs[\s_-]*work/i], ["lgtm", /✅|\blgtm\b/i]];
+
+/* The verdict named first, so a legend listing all three after it does not count. */
+function findVerdict(text) {
+  let best = null;
+  for (const [id, pattern] of VERDICT_PATTERNS) {
+    const at = String(text || "").search(pattern);
+    if (at !== -1 && (!best || at < best.at)) best = { id, at };
+  }
+  return best?.id || null;
+}
+
+/* Headings and the lines under them, ignoring "#" inside fenced code. */
+function markdownSections(body) {
+  const parts = [];
+  let fenced = false;
+  for (const line of body.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    const heading = !fenced && line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+    if (heading) parts.push({ level: heading[1].length, title: heading[2], lines: [] });
+    else parts[parts.length - 1]?.lines.push(line);
+  }
+  return parts;
+}
+
+/* A section's text including its subsections. */
+function sectionText(parts, at) {
+  const lines = [...parts[at].lines];
+  for (let i = at + 1; i < parts.length && parts[i].level > parts[at].level; i += 1) lines.push(parts[i].title, ...parts[i].lines);
+  return lines.join("\n").trim();
+}
+
+/* §1 of the report (its summary), as plain text. */
+function reportSummary(parts) {
+  let at = parts.findIndex((part) => /^(?:§\s*)?1(?![\d.]\d)(?:[.、:：)\s]|$)/.test(part.title));
+  if (at === -1) at = parts.findIndex((part) => /总结|summary/i.test(part.title));
+  if (at === -1) return "";
+  const text = sectionText(parts, at).replace(/\*\*|__|`/g, "").replace(/\n{3,}/g, "\n\n");
+  return text.length > 900 ? `${text.slice(0, 900).trimEnd()}…` : text;
+}
+
+/* Does the report cover the PR's current head commit? */
+function reportFreshness(pr, meta) {
+  const sha = String(meta.head_sha || "").toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return { className: "muted small", text: "The report does not record which commit it reviewed." };
+  if (pr.headOid.toLowerCase().startsWith(sha)) return { className: "t-good small", text: `Covers the latest commit (${pr.headOid.slice(0, 7)})` };
+  return { className: "t-warn small", stale: true, text: `PR has new commits since this review (${sha.slice(0, 7)} → ${pr.headOid.slice(0, 7)})` };
+}
+
+/* GitHub renders the Markdown exactly as it would on github.com (#123 links included). */
+async function renderMarkdown(text, context) {
+  const response = await fetch(`${API_ROOT}/markdown`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ text, mode: "gfm", context })
+  });
+  if (response.status === 401) signOut("GitHub rejected the token.");
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.text();
+}
+
 /* ── 5. refresh scheduler ──────────────────────────────────────────────── */
 
 const refreshQueue = [];
@@ -989,6 +1162,7 @@ function tick() {
     }
     refreshBaselines();
   }
+  refreshReports();   // REST quota, not GraphQL, so the GraphQL throttle does not apply
   if (state.prefs.unpinClosed) {
     const old = state.board.pins.filter((pin) => {
       const pr = state.data.get(pin.key);
@@ -1047,6 +1221,11 @@ async function syncGroup(id) {
 function refreshAll() {
   for (const pin of state.board.pins) queueRefresh(pin, { force: true });
   state.baselines.clear();
+  for (const [key, blob] of state.reportBlobs) {
+    if (blob.error) state.reportBlobs.delete(key);
+    else delete blob.htmlError;
+  }
+  refreshReports(true);
 }
 
 /* After an action: re-read the PR once GitHub has had a moment. Takes a key so a
@@ -2023,6 +2202,7 @@ function row(pin, index) {
         pr.reviewRequested ? el("span", { class: "t-warn", text: "your review requested" }) : null,
         el("span", { title: new Date(pr.updatedAt).toLocaleString(), text: `updated ${ago(pr.updatedAt)} ago` }),
         review ? el("span", { class: pr.reviewDecision === "APPROVED" ? "t-good" : "t-bad", text: review }) : null,
+        reportChip(pr),
         ...pr.labels.filter((label) => quick.includes(label.name)).map(labelChip),
         status.error ? el("span", { class: "t-bad", title: status.error, text: "refresh failed" }) : null
       ])
@@ -2126,6 +2306,9 @@ function renderDetail(index) {
     ]),
     result.action ? btn(result.action.label, result.action.run, { primary: true }) : null
   ]));
+
+  const reports = reportPanel(pr);
+  if (reports) blocks.push(reports);
 
   if (open) {
     const build = ci.builds.map((item) => item.desc).filter(Boolean)[0];
@@ -2242,6 +2425,167 @@ function jobList(title, kind, items, limit = 40) {
   ]);
 }
 
+/* AI review: verdict, freshness and summary here; the full report opens in a modal (i). */
+function reportPanel(pr) {
+  const sources = reportSources().filter((source) => source.repo === pr.repo);
+  if (!sources.length) return null;
+  const reports = reportsFor(pr);
+  // Read on first view, then from the cache until the file's blob SHA changes.
+  for (const report of reports) loadReport(report.source, report.file);
+  const indexes = sources.map((source) => ({ source, index: state.reports.get(source.line) }));
+  const problems = indexes.filter(({ index }) => index?.error).map(({ source, index }) => el("div", {
+    class: "t-bad small",
+    text: `Could not list ${source.source}${source.ref ? `@${source.ref}` : ""}:${source.dir || "/"} — ${index.error}`
+  }));
+  if (!reports.length) {
+    const looking = indexes.some(({ index }) => !index?.at);
+    return panel("AI review", [el("div", { class: "muted", text: looking ? "Looking for AI review reports…" : "No AI review report for this PR yet." }), ...problems]);
+  }
+  return panel("AI review", [...reports.map((report) => reportCard(pr, report, reports.length > 1)), ...problems]);
+}
+
+function reportCard(pr, report, named) {
+  const blob = report.blob;
+  if (!blob || blob.loading) return el("div", { class: "report muted", text: "Reading the report…" });
+  if (blob.error) return el("div", { class: "report t-bad", text: `Could not read ${report.file.path}: ${blob.error}` });
+  const freshness = reportFreshness(pr, blob.meta);
+  const otherPr = blob.meta.pr && Number(blob.meta.pr) !== pr.number;
+  return el("div", { class: "report" }, [
+    el("div", { class: "report-line" }, reportFacts(blob, named ? report.source : null)),
+    el("div", { class: freshness.className, text: freshness.text }),
+    otherPr ? el("div", { class: "t-warn small", text: `The report says it is for #${blob.meta.pr}.` }) : null,
+    blob.summary ? el("div", { class: "report-summary", text: blob.summary }) : null,
+    el("div", { class: "btn-row" }, [
+      el("button", { class: "btn", title: "Shortcut: i", onclick: () => openReport(pr, report), text: "View full report" }),
+      report.file.url ? el("button", { class: "btn", onclick: () => openUrl(report.file.url), text: "Open file ↗" }) : null
+    ])
+  ]);
+}
+
+function reportFacts(blob, source) {
+  const at = blob.meta.reviewed_at && !Number.isNaN(Date.parse(blob.meta.reviewed_at)) ? blob.meta.reviewed_at : null;
+  return [
+    verdictBadge(blob.verdict),
+    at ? el("span", { title: new Date(at).toLocaleString(), text: `reviewed ${ago(at)} ago` }) : null,
+    blob.meta.skill ? el("span", { text: blob.meta.skill }) : null,
+    source ? el("span", { text: source.source }) : null
+  ];
+}
+
+function verdictBadge(verdict) {
+  const known = VERDICTS[verdict];
+  return el("span", { class: `verdict-badge v-${known ? verdict : "unknown"}`, text: known ? known.label : "no verdict" });
+}
+
+/* Rows only say that a report exists; its verdict shows once the detail pane has read it. */
+function reportChip(pr) {
+  const report = reportsFor(pr)[0];
+  if (!report) return null;
+  const known = VERDICTS[report.blob?.verdict];
+  const stale = report.blob?.meta && reportFreshness(pr, report.blob.meta).stale;
+  return el("span", {
+    class: `ai-chip v-${known ? report.blob.verdict : "unknown"}`,
+    title: stale ? "AI review report · the PR has new commits since" : "AI review report",
+    text: `AI ${known ? known.short : "report"}${stale ? " · stale" : ""}`
+  });
+}
+
+/* Report HTML comes from GitHub's renderer but its content from whoever wrote the report:
+   keep a short list of tags and attributes, and only web links. Mermaid blocks become
+   <pre class="mermaid-src"> for drawMermaid. */
+const REPORT_TAGS = new Set(["a", "abbr", "b", "blockquote", "br", "code", "dd", "del", "details", "div", "dl", "dt", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+  "hr", "i", "img", "input", "ins", "kbd", "li", "ol", "p", "pre", "q", "s", "samp", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]);
+const REPORT_DROP = new Set(["script", "style", "iframe", "object", "embed", "form", "link", "meta", "base", "svg", "math", "template", "noscript", "frame", "frameset", "textarea", "select", "button"]);
+const REPORT_ATTRS = new Set(["href", "src", "alt", "title", "align", "colspan", "rowspan", "start", "type", "checked", "open", "lang", "dir"]);
+
+function sanitizeReport(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const block of doc.querySelectorAll('[data-type="mermaid"], pre[lang="mermaid"]')) {
+    const source = block.matches("pre") ? block : block.querySelector('pre[lang="mermaid"]');
+    const pre = doc.createElement("pre");
+    pre.className = "mermaid-src";
+    pre.textContent = source?.textContent ?? block.querySelector("[data-plain]")?.getAttribute("data-plain") ?? "";
+    block.replaceWith(pre);
+  }
+  const clean = (node) => {
+    for (const child of [...node.children]) {
+      const tag = child.tagName.toLowerCase();
+      if (REPORT_DROP.has(tag) || (tag === "input" && child.getAttribute("type") !== "checkbox")) {
+        child.remove();
+        continue;
+      }
+      clean(child);
+      if (!REPORT_TAGS.has(tag)) {
+        child.replaceWith(...child.childNodes);
+        continue;
+      }
+      for (const { name, value } of [...child.attributes]) {
+        // GitHub prefixes heading ids with user-content-, so they cannot collide with the app's own ids.
+        const keep = REPORT_ATTRS.has(name) || (name === "class" && value === "mermaid-src") || (name === "id" && value.startsWith("user-content-"));
+        if (!keep) child.removeAttribute(name);
+      }
+      for (const name of ["href", "src"]) {
+        const value = child.getAttribute(name);
+        if (value !== null && !safeUrl(value) && !(name === "href" && value.startsWith("#"))) child.removeAttribute(name);
+      }
+      if (tag === "a" && safeUrl(child.getAttribute("href"))) {
+        child.setAttribute("target", "_blank");
+        child.setAttribute("rel", "noopener noreferrer");
+      }
+      if (tag === "input") child.setAttribute("disabled", "");
+    }
+  };
+  clean(doc.body);
+  return doc.body;
+}
+
+/* Mermaid.js comes from the CDN only when a report has a diagram; without it the source stays. */
+let mermaidLoading = null;
+function loadMermaid() {
+  if (window.mermaid) return Promise.resolve(window.mermaid);
+  mermaidLoading ||= new Promise((resolve, reject) => {
+    document.head.append(el("script", {
+      src: MERMAID_URL,
+      integrity: MERMAID_SRI,
+      crossorigin: "anonymous",
+      onload: () => (window.mermaid ? resolve(window.mermaid) : reject(new Error("Mermaid did not load"))),
+      onerror: () => reject(new Error("Mermaid could not be loaded"))
+    }));
+  }).catch((error) => {
+    mermaidLoading = null;   // try again next time
+    throw error;
+  });
+  return mermaidLoading;
+}
+
+function isDarkTheme() {
+  const theme = document.documentElement.dataset.theme;
+  return theme ? theme.startsWith("dark") : matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+async function drawMermaid(container) {
+  const blocks = [...container.querySelectorAll("pre.mermaid-src")];
+  if (!blocks.length) return;
+  let mermaid;
+  try {
+    mermaid = await loadMermaid();
+    mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true, theme: isDarkTheme() ? "dark" : "default" });
+  } catch {
+    for (const block of blocks) block.before(el("div", { class: "muted small", text: "Mermaid could not be loaded, so this diagram is shown as source." }));
+    return;
+  }
+  for (const block of blocks) {
+    try {
+      const { svg } = await mermaid.render(`report-mermaid-${(state.seq += 1)}`, block.textContent);
+      const figure = el("div", { class: "mermaid-figure" });
+      figure.innerHTML = svg;   // strict mode: Mermaid sanitizes the labels it draws
+      block.replaceWith(figure);
+    } catch {
+      block.before(el("div", { class: "muted small", text: "This diagram could not be drawn, so it is shown as source." }));
+    }
+  }
+}
+
 /* Overlays */
 
 function renderOverlays() {
@@ -2349,6 +2693,8 @@ function signOut(message = "") {
   state.authError = message;
   state.data.clear();
   state.status.clear();
+  state.reports.clear();
+  state.reportBlobs.clear();
   shellMode = null;
   render();
 }
@@ -2704,6 +3050,8 @@ function openSettings() {
   const notify = el("input", { type: "checkbox", checked: state.prefs.notify });
   const unpinClosed = el("input", { type: "checkbox", checked: state.prefs.unpinClosed });
   const following = el("input", { type: "text", value: state.prefs.following.join(" "), placeholder: "usernames, separated by spaces", spellcheck: "false", onkeydown: (event) => event.key === "Enter" && save() });
+  const reportSourcesInput = el("textarea", { rows: 3, spellcheck: "false", placeholder: "owner/repo = reports-owner/reports-repo@branch:reviews/pr-{number}-review.md" });
+  reportSourcesInput.value = state.prefs.reportSources.join("\n");
   const file = el("input", {
     type: "file",
     accept: "application/json,.json",
@@ -2757,6 +3105,9 @@ function openSettings() {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast("Default repository must look like owner/name", "error");
     const profileRepo = profileSelect.value === NEW_PROFILE ? profileRepoInput.value.trim() : profileSelect.value;
     if (!/^[\w.-]+\/[\w.-]+$/.test(profileRepo)) return toast("Workflow repository must look like owner/name", "error");
+    const sourceLines = reportSourcesInput.value.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+    const badSource = sourceLines.find((line) => !parseReportSource(line));
+    if (badSource) return toast(`Report source must look like owner/repo = owner/reports@branch:dir/pr-{number}.md: ${badSource}`, "error");
     const commands = Object.fromEntries(PROFILE_COMMAND_KEYS.map((key) => [key, commandInputs[key].value.trim()]));
     const hasCommands = PROFILE_COMMAND_KEYS.some((key) => commands[key]);
     state.prefs.defaultRepo = repo;
@@ -2765,6 +3116,12 @@ function openSettings() {
     state.prefs.unpinClosed = unpinClosed.checked;
     state.prefs.theme = theme.value;
     state.prefs.following = parseLogins(following.value);
+    const sources = [...new Set(sourceLines.map((line) => parseReportSource(line).line))];
+    if (sources.join("\n") !== state.prefs.reportSources.join("\n")) {
+      state.prefs.reportSources = sources;
+      state.reports.clear();
+      refreshReports(true);
+    }
     state.prefs.repoProfiles = {
       ...state.prefs.repoProfiles,
       [profileRepo]: normalizeProfile({
@@ -2809,6 +3166,11 @@ function openSettings() {
       el("label", { class: "check-row" }, [unpinClosed, "Unpin merged/closed PRs after a day"]),
       el("label", { class: "field" }, ["Following", following]),
       el("p", { class: "muted small", text: "Their names are highlighted, and Add PRs gets a Following list." }),
+      el("label", { class: "field" }, ["AI review reports · one source per line", reportSourcesInput]),
+      el("p", { class: "muted small" }, [
+        "For PRs in ", el("code", { text: "owner/repo" }), ", read reports from a directory in another repository; ",
+        el("code", { text: "{number}" }), " in the file name is the PR number, and ", el("code", { text: "@branch" }), " is optional. Directories are re-listed every 10 minutes and on Refresh."
+      ]),
       el("p", { class: "muted small", text: `Your board is saved in this browser for ${location.host}. Export it to move it to another browser or address, or to keep a copy.` })
     ]),
     el("div", { class: "settings-footer" }, [
@@ -2861,6 +3223,7 @@ const HELP = [
   ["m", "cycle owner: everyone · mine · others'"],
   ["/", "filter by text"],
   [". / shift+r", "refresh this PR / everything"],
+  ["i", "open the full AI review report"],
   ["?", "this help"],
   [",", "settings"]
 ];
@@ -2873,6 +3236,65 @@ function openHelp() {
     el("div", { class: "help" }, HELP.flatMap(([keys, what]) => [el("span", { class: "help-keys", text: keys }), el("span", { text: what })])),
     el("div", { class: "modal-foot" }, [el("span"), el("button", { class: "btn", onclick: closeModal, text: "Close" })])
   ]));
+}
+
+/* The whole report, rendered by GitHub's /markdown and filtered before it is shown. */
+function openReport(pr = cursorPR(), report = pr && reportsFor(pr)[0]) {
+  if (!pr) return;
+  if (!report) return toast(`No AI review report for ${shortRef(pr.repo, pr.number)}`);
+  const key = blobKey(report.source, report.file);
+  const facts = el("div", { class: "report-line" });
+  const body = el("div", { class: "report-body" }, [el("p", { class: "muted", text: "Loading the report…" })]);
+  let shown = false;
+  const show = (...nodes) => {
+    body.replaceChildren(...nodes);
+    shown = true;
+  };
+  const modal = {
+    update() {
+      const blob = state.reportBlobs.get(key);
+      if (!blob || blob.loading) return;
+      if (blob.error) {
+        if (!shown) show(el("p", { class: "t-bad", text: `Could not read ${report.file.path}: ${blob.error}` }));
+        return;
+      }
+      const freshness = reportFreshness(pr, blob.meta);
+      facts.replaceChildren(...reportFacts(blob, report.source), el("span", { class: freshness.className, text: freshness.text }));
+      if (shown) return;
+      if (blob.html) {
+        show(...sanitizeReport(blob.html).childNodes);
+        drawMermaid(body);
+      } else if (blob.htmlError) {
+        show(
+          el("p", { class: "t-warn small", text: `GitHub could not render the report (${blob.htmlError}), so this is the Markdown source.` }),
+          el("pre", { class: "report-raw", text: blob.body })
+        );
+      } else if (!blob.rendering) {
+        blob.rendering = true;
+        renderMarkdown(blob.body, pr.repo)
+          .then((html) => {
+            blob.html = html;
+          })
+          .catch((error) => {
+            blob.htmlError = error.message;
+          })
+          .finally(() => {
+            blob.rendering = false;
+            render();
+          });
+      }
+    }
+  };
+  loadReport(report.source, report.file);
+  mountModal(modal, el("div", { class: "modal report-modal" }, [
+    el("div", { class: "report-head" }, [el("h2", { text: `AI review · ${shortRef(pr.repo, pr.number)} · ${pr.title}` }), facts]),
+    body,
+    el("div", { class: "modal-foot" }, [
+      report.file.url ? el("button", { class: "btn", onclick: () => openUrl(report.file.url), text: "Open file on GitHub ↗" }) : el("span"),
+      el("button", { class: "btn", onclick: closeModal, text: "Close" })
+    ])
+  ]));
+  modal.update();
 }
 
 /* ── 10. keyboard + boot ───────────────────────────────────────────────── */
@@ -2905,6 +3327,7 @@ const KEYS = {
   ".": () => cursorPin() && queueRefresh(cursorPin(), { force: true }),
   R: refreshAll,
   ",": openSettings,
+  i: () => openReport(),
   "?": openHelp,
   "/": () => document.querySelector("#filter")?.focus(),
   Escape: () => {
