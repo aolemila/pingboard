@@ -19,6 +19,8 @@
 
 const TOKEN_KEY = "pingboard.githubToken";
 const SESSION_KEY = "pingboard.sessionToken";
+const GL_TOKEN_KEY = "pingboard.gitlabToken";       // kept like the GitHub token: local or session storage
+const GL_SESSION_KEY = "pingboard.gitlabSessionToken";
 const API_ROOT = "https://api.github.com";
 const API_VERSION = "2022-11-28";
 
@@ -193,7 +195,25 @@ function pinKey(repo, number) {
   return `${repo}#${number}`;
 }
 
+/* GitLab merge requests are pinned as "gl:group/project" (one GitLab instance, set in Settings);
+   pin keys stay "repo#number" internally and only the displayed reference uses "!". */
+const PIN_REPO_RE = /^(?:gl:[\w.-]+(?:\/[\w.-]+)+|[\w.-]+\/[\w.-]+)$/;
+const PIN_KEY_RE = /^(?:gl:[\w.-]+(?:\/[\w.-]+)+|[\w.-]+\/[\w.-]+)#\d+$/;
+
+function isGitlab(repo) {
+  return String(repo).startsWith("gl:");
+}
+
+function glPath(repo) {
+  return repo.slice(3);
+}
+
+function fullRef(repo, number) {
+  return isGitlab(repo) ? `${glPath(repo)}!${number}` : `${repo}#${number}`;
+}
+
 function shortRef(repo, number) {
+  if (isGitlab(repo)) return fullRef(repo, number);
   return repo === state.prefs.defaultRepo ? `#${number}` : `${repo}#${number}`;
 }
 
@@ -206,13 +226,16 @@ function openUrl(url) {
   if (safeUrl(url)) window.open(url, "_blank", "noopener");
 }
 
-/* "123", "#123", "owner/repo#123" or a PR URL; several may be pasted at once.
+/* "123", "#123", "owner/repo#123", a PR URL, a GitLab MR URL or "group/project!123";
+   several may be pasted at once.
    Returns null when the input is not purely PR references (i.e. it is a search). */
 function parseRefs(raw) {
   const refs = [];
   for (const token of raw.trim().split(/[\s,]+/).filter(Boolean)) {
     let match;
     if ((match = token.match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/))) refs.push({ repo: match[1], number: Number(match[2]) });
+    else if ((match = token.match(/^https?:\/\/[^/\s]+\/([\w.-]+(?:\/[\w.-]+)+)\/-\/merge_requests\/(\d+)/))) refs.push({ repo: `gl:${match[1]}`, number: Number(match[2]) });
+    else if ((match = token.match(/^([\w.-]+(?:\/[\w.-]+)+)!(\d+)$/))) refs.push({ repo: `gl:${match[1]}`, number: Number(match[2]) });
     else if ((match = token.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/))) refs.push({ repo: match[1], number: Number(match[2]) });
     else if ((match = token.match(/^#?(\d+)$/))) refs.push({ repo: state.prefs.defaultRepo, number: Number(match[1]) });
     else return null;
@@ -224,13 +247,16 @@ function parseRefs(raw) {
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(SESSION_KEY) || "",
+  gitlabToken: localStorage.getItem(GL_TOKEN_KEY) || sessionStorage.getItem(GL_SESSION_KEY) || "",
+  gitlabUser: null,       // GitLab /user, once the token has been checked
+  gitlabError: "",
   remember: Boolean(localStorage.getItem(TOKEN_KEY)),
   user: null,
   authLoading: false,
   authError: "",
 
   board: { groups: [], pins: [] },   // groups: [{id, name, collapsed, query?, dismissed?}]; pins: [{key, repo, number, group, addedAt, seen, seenActivity, via}]
-  prefs: { interval: 60, notify: false, defaultRepo: DEFAULT_REPO, boardWidth: BOARD_WIDTH, following: [], repoProfiles: {}, sort: "manual", filter: "all", owner: "all", unpinClosed: false, theme: "system", reportSources: [] },
+  prefs: { interval: 60, notify: false, defaultRepo: DEFAULT_REPO, boardWidth: BOARD_WIDTH, following: [], repoProfiles: {}, sort: "manual", filter: "all", owner: "all", unpinClosed: false, theme: "system", reportSources: [], gitlabUrl: "" },
 
   data: new Map(),        // pin key -> PR model
   status: new Map(),      // pin key -> {at, loading, error}
@@ -269,8 +295,14 @@ function normalizePrefs(raw) {
     owner: OWNERS.some((owner) => owner.id === prefs.owner) ? prefs.owner : "all",
     unpinClosed: Boolean(prefs.unpinClosed),
     theme: THEMES.some((theme) => theme.id === prefs.theme) ? prefs.theme : "system",
-    reportSources: [...new Set((Array.isArray(prefs.reportSources) ? prefs.reportSources : []).map(parseReportSource).filter(Boolean).map((source) => source.line))]
+    reportSources: [...new Set((Array.isArray(prefs.reportSources) ? prefs.reportSources : []).map(parseReportSource).filter(Boolean).map((source) => source.line))],
+    gitlabUrl: normalizeGitlabUrl(prefs.gitlabUrl)
   };
+}
+
+/* "https://gitlab.example.com" (https only, no path), or "" for no GitLab. */
+function normalizeGitlabUrl(value) {
+  return String(value || "").trim().match(/^(https:\/\/[\w.-]+(?::\d+)?)\/*$/)?.[1] || "";
 }
 
 function loadUserState() {
@@ -292,14 +324,14 @@ function cleanBoard(raw) {
       collapsed: Boolean(group.collapsed),
       ...(typeof group.query === "string" && group.query.trim() ? {
         query: group.query.trim(),
-        dismissed: (Array.isArray(group.dismissed) ? group.dismissed : []).filter((key) => /^[\w.-]+\/[\w.-]+#\d+$/.test(key)).slice(-DISMISSED_MAX)
+        dismissed: (Array.isArray(group.dismissed) ? group.dismissed : []).filter((key) => PIN_KEY_RE.test(key)).slice(-DISMISSED_MAX)
       } : {})
     }));
   if (!groups.length) return null;
   const seen = new Set();
   const pins = [];
   for (const pin of raw.pins) {
-    if (!pin || !/^[\w.-]+\/[\w.-]+$/.test(pin.repo || "") || !Number.isInteger(pin.number) || pin.number <= 0) continue;
+    if (!pin || !PIN_REPO_RE.test(pin.repo || "") || !Number.isInteger(pin.number) || pin.number <= 0) continue;
     const key = pinKey(pin.repo, pin.number);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -585,6 +617,177 @@ async function fetchContexts(owner, name, oid, cursor = null) {
   return nodes;
 }
 
+/* GitLab: REST from the browser with a personal access token (the instance must allow CORS).
+   A merge request becomes the same model as a GitHub PR, so the board and detail pane show it
+   unchanged; GitLab's pipeline is the "build" and its jobs are the checks. */
+
+async function glRest(method, path, body) {
+  if (!state.prefs.gitlabUrl || !state.gitlabToken) throw new Error("GitLab is not set up: add its URL and a token in Settings");
+  const response = await fetch(`${state.prefs.gitlabUrl}/api/v4${path}`, {
+    method,
+    headers: { "PRIVATE-TOKEN": state.gitlabToken, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    /* non-JSON body */
+  }
+  if (response.status === 401) state.gitlabError = "GitLab rejected the token.";
+  if (!response.ok) {
+    const message = json?.message ?? json?.error;
+    throw new Error(message ? (typeof message === "string" ? message : JSON.stringify(message)) : `${response.status} ${response.statusText}`);
+  }
+  return { json, headers: response.headers };
+}
+
+function storeGitlabToken(token) {
+  state.gitlabToken = token;
+  try {
+    localStorage.removeItem(GL_TOKEN_KEY);
+    sessionStorage.removeItem(GL_SESSION_KEY);
+    if (token) (state.remember ? localStorage : sessionStorage).setItem(state.remember ? GL_TOKEN_KEY : GL_SESSION_KEY, token);
+  } catch {
+    /* private mode: the token still works for this page */
+  }
+}
+
+/* Who the GitLab token belongs to: "mine", "your review requested" and the change dot need it. */
+async function loadGitlabUser() {
+  if (!state.prefs.gitlabUrl || !state.gitlabToken) return;
+  try {
+    state.gitlabUser = (await glRest("GET", "/user")).json;
+    state.gitlabError = "";
+    for (const pin of state.board.pins) if (isGitlab(pin.repo)) queueRefresh(pin, { force: true });
+  } catch (error) {
+    state.gitlabError = error.message;
+  }
+  render();
+}
+
+const GL_STATES = { success: "pass", failed: "fail", canceled: "fail", skipped: "skip", manual: "skip" };
+
+function isoTime(value) {
+  return value ? new Date(value).toISOString() : null;
+}
+
+async function fetchMR(pin) {
+  const project = encodeURIComponent(glPath(pin.repo));
+  const base = `/projects/${project}/merge_requests/${pin.number}`;
+  const [{ json: mr }, { json: notes }, approvals] = await Promise.all([
+    glRest("GET", `${base}?include_diverged_commits_count=true&with_labels_details=true`),
+    glRest("GET", `${base}/notes?sort=desc&order_by=created_at&per_page=50`),
+    glRest("GET", `${base}/approvals`).then((result) => result.json).catch(() => null)
+  ]);
+  const pipeline = mr.head_pipeline;
+  const jobs = pipeline ? (await glRest("GET", `/projects/${project}/pipelines/${pipeline.id}/jobs?per_page=100`)).json || [] : [];
+  const checks = jobs.map((job) => ({
+    name: job.name,
+    jobKey: job.name,
+    label: job.stage ? `${job.stage} / ${job.name}` : job.name,
+    state: job.status === "failed" && job.allow_failure ? "skip" : GL_STATES[job.status] || "pending",
+    desc: job.status,
+    url: safeUrl(job.web_url),
+    at: job.started_at || job.created_at
+  }));
+  if (pipeline) {
+    checks.push({
+      name: "pipeline", jobKey: "pipeline", pipeline: "pipeline", isBuild: true, label: `pipeline #${pipeline.id}`,
+      state: GL_STATES[pipeline.status] || "pending", desc: `pipeline ${pipeline.status}`, url: safeUrl(pipeline.web_url), at: pipeline.created_at
+    });
+  }
+
+  const me = state.gitlabUser?.username;
+  const human = (notes || []).filter((note) => !note.system);
+  // Notes come newest first; inline (diff) notes say which line they are on.
+  const comments = human.slice(0, 5).reverse().map((note) => {
+    const where = note.type === "DiffNote" && note.position ? `${note.position.new_path || note.position.old_path}:${note.position.new_line ?? note.position.old_line} · ` : "";
+    return {
+      login: note.author?.username || "ghost",
+      text: `${where}${String(note.body || "").replace(/\n{3,}/g, "\n\n").trim()}`,
+      at: isoTime(note.created_at),
+      url: safeUrl(`${mr.web_url}#note_${note.id}`)
+    };
+  });
+  const activityAt = human.reduce((newest, note) => {
+    const at = isoTime(note.created_at);
+    return note.author?.username !== me && at > newest ? at : newest;
+  }, "");
+  const approvedBy = (approvals?.approved_by || []).map((item) => item.user?.username).filter(Boolean);
+  const status = { opened: "OPEN", merged: "MERGED" }[mr.state] || "CLOSED";
+  return {
+    key: pin.key,
+    repo: pin.repo,
+    number: mr.iid,
+    id: mr.id,
+    host: "gitlab",
+    webBase: `${state.prefs.gitlabUrl}/${glPath(pin.repo)}`,
+    title: mr.title,
+    url: safeUrl(mr.web_url),
+    state: status,
+    isDraft: Boolean(mr.draft ?? mr.work_in_progress),
+    updatedAt: isoTime(mr.updated_at),
+    closedAt: isoTime(mr.merged_at || mr.closed_at),
+    author: mr.author?.username || "ghost",
+    base: mr.target_branch,
+    headOid: mr.sha,
+    headDate: null,
+    mergeable: mr.has_conflicts ? "CONFLICTING" : /^(checking|unchecked|preparing|approvals_syncing)$/.test(mr.detailed_merge_status || "") ? "UNKNOWN" : "MERGEABLE",
+    mergeState: mr.detailed_merge_status === "need_rebase" ? "BEHIND" : "CLEAN",
+    reviewDecision: approvedBy.length ? "APPROVED" : "REVIEW_REQUIRED",
+    canUpdate: false,
+    autoMerge: false,
+    additions: null,
+    deletions: null,
+    files: mr.changes_count ?? null,
+    labels: (mr.labels || []).map((label) => (typeof label === "string" ? { name: label, color: "888888" } : { name: label.name, color: String(label.color || "#888888").replace(/^#/, "") })),
+    reviews: approvedBy.map((login) => ({ login, state: "APPROVED" })),
+    reviewRequested: status === "OPEN" && Boolean(me) && (mr.reviewers || []).some((reviewer) => reviewer.username === me) && !approvedBy.includes(me),
+    comments,
+    activityAt,
+    behind: Number.isInteger(mr.diverged_commits_count) ? mr.diverged_commits_count : null,
+    checks,
+    fingerprint: "",
+    ci: summarizeCi(checks, profileFor(pin.repo))
+  };
+}
+
+/* "gitlab: reviewer_username=@me" — any filters of GitLab's merge request list, as key=value
+   terms; @me is the token's user, and project=group/project limits it to one project. */
+async function searchGitlab(query) {
+  const params = new URLSearchParams();
+  let project = null;
+  for (const term of query.replace(/^gitlab:/, "").trim().split(/\s+/).filter(Boolean)) {
+    const at = term.indexOf("=");
+    if (at <= 0 || at === term.length - 1) throw new Error(`GitLab search terms look like key=value: ${term}`);
+    const key = term.slice(0, at);
+    let value = term.slice(at + 1);
+    if (value === "@me") {
+      if (!state.gitlabUser) state.gitlabUser = (await glRest("GET", "/user")).json;
+      value = state.gitlabUser.username;
+    }
+    if (key === "project") project = value;
+    else params.set(key, value);
+  }
+  params.set("state", "opened");
+  if (!project && !params.has("scope")) params.set("scope", "all");
+  params.set("order_by", "updated_at");
+  params.set("per_page", "50");
+  const path = project ? `/projects/${encodeURIComponent(project)}/merge_requests` : "/merge_requests";
+  const { json, headers } = await glRest("GET", `${path}?${params}`);
+  const items = Array.isArray(json) ? json : [];
+  const refs = items.map((mr) => ({ repo: `gl:${String(mr.references?.full || "").split("!")[0]}`, number: mr.iid })).filter((ref) => PIN_REPO_RE.test(ref.repo));
+  const total = headers.get("x-total");
+  return { count: total !== null ? Number(total) : items.length < 50 ? items.length : Infinity, refs };
+}
+
+async function searchGithub(query) {
+  const data = await gql(SEARCH_QUERY, { query: `is:pr is:open ${query} sort:updated-desc` });
+  return { count: data.search.issueCount, refs: data.search.nodes.filter((node) => node?.number).map((node) => ({ repo: node.repository.nameWithOwner, number: node.number })) };
+}
+
 /* ── 4. PR model ───────────────────────────────────────────────────────── */
 
 const STATUS_STATES = { SUCCESS: "pass", FAILURE: "fail", ERROR: "fail", PENDING: "pending", EXPECTED: "pending" };
@@ -702,7 +905,7 @@ async function loadPRs(pins, bases) {
 
 /* Reads [{ pin, options }] in one request (two if a base branch moved); each
    entry settles to its PR or its own Error. */
-async function fetchPRs(entries) {
+async function fetchGithubPRs(entries) {
   const pins = entries.map((entry) => entry.pin);
   const bases = pins.map((pin) => state.data.get(pin.key)?.base || "main");
   const repos = await loadPRs(pins, bases);
@@ -713,6 +916,20 @@ async function fetchPRs(entries) {
     moved.forEach((i, j) => (repos[i] = again[j]));
   }
   return Promise.all(entries.map(({ pin, options }, i) => (repos[i] instanceof Error ? repos[i] : toPR(pin, repos[i], bases[i], options).catch((error) => error))));
+}
+
+/* GitHub pins share batched GraphQL requests; GitLab merge requests are read one by one. */
+async function fetchPRs(entries) {
+  const results = new Array(entries.length);
+  const github = [];
+  const gitlab = [];
+  entries.forEach((entry, i) => (isGitlab(entry.pin.repo) ? gitlab : github).push(i));
+  const [fromGithub] = await Promise.all([
+    github.length ? fetchGithubPRs(github.map((i) => entries[i])) : [],
+    Promise.all(gitlab.map((i) => fetchMR(entries[i].pin).catch((error) => error).then((pr) => (results[i] = pr))))
+  ]);
+  github.forEach((i, j) => (results[i] = fromGithub[j]));
+  return results;
 }
 
 async function fetchPR(pin, options = {}) {
@@ -828,7 +1045,8 @@ function splitFailures(pr, index = failureIndex()) {
     };
     (evidence.base || evidence.others.length ? shared : own).push({ check, evidence });
   }
-  return { own, shared, baselineReady: Boolean(baseline) };
+  // GitLab base branches are not scanned, so only other pinned MRs count as evidence there.
+  return { own, shared, baselineReady: Boolean(baseline) || isGitlab(pr.repo) };
 }
 
 async function refreshBaseline(repo, base) {
@@ -893,7 +1111,7 @@ async function loadLabels(repo) {
 /* "owner/repo = reports-owner/reports-repo@branch:dir/pr-{number}-review.md" — where the
    reports for owner/repo's PRs live. The branch is optional (the default branch). */
 function parseReportSource(line) {
-  const match = String(line).trim().match(/^([\w.-]+\/[\w.-]+)\s*=\s*([\w.-]+\/[\w.-]+)(?:@([^\s:]+))?:\/*(\S+)$/);
+  const match = String(line).trim().match(/^(gl:[\w.-]+(?:\/[\w.-]+)+|[\w.-]+\/[\w.-]+)\s*=\s*([\w.-]+\/[\w.-]+)(?:@([^\s:]+))?:\/*(\S+)$/);
   if (!match) return null;
   const [, repo, source, ref = "", template] = match;
   const slash = template.lastIndexOf("/");
@@ -1041,7 +1259,7 @@ async function renderMarkdown(text, context) {
   const response = await fetch(`${API_ROOT}/markdown`, {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ text, mode: "gfm", context })
+    body: JSON.stringify({ text, mode: "gfm", ...(context && !isGitlab(context) ? { context } : {}) })
   });
   if (response.status === 401) signOut("GitHub rejected the token.");
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
@@ -1135,7 +1353,7 @@ function refreshBaselines() {
   const now = Date.now();
   for (const pr of state.data.values()) {
     const key = `${pr.repo}@${pr.base}`;
-    if (pr.state !== "OPEN" || baselineInFlight.has(key)) continue;
+    if (pr.state !== "OPEN" || isGitlab(pr.repo) || baselineInFlight.has(key)) continue;
     if (now - (state.baselines.get(key)?.at || 0) <= BASELINE_TTL_MS) continue;
     baselineInFlight.add(key);
     refreshBaseline(pr.repo, pr.base).catch(() => {}).finally(() => {
@@ -1186,7 +1404,7 @@ async function syncGroup(id) {
   const query = group.query;
   state.searches.set(id, { ...status, loading: true });
   try {
-    const data = await gql(SEARCH_QUERY, { query: `is:pr is:open ${query} sort:updated-desc` });
+    const result = query.startsWith("gitlab:") ? await searchGitlab(query) : await searchGithub(query);
     const current = state.board.groups.find((item) => item.id === id);   // another tab may have replaced the board
     if (current?.query !== query) {
       state.searches.delete(id);
@@ -1194,15 +1412,13 @@ async function syncGroup(id) {
     }
     const found = new Set();
     let added = 0;
-    for (const node of data.search.nodes) {
-      if (!node?.number) continue;
-      const repo = node.repository.nameWithOwner;
-      found.add(pinKey(repo, node.number));
-      if (!current.dismissed.includes(pinKey(repo, node.number)) && addPin(repo, node.number, id, id)) added += 1;
+    for (const { repo, number } of result.refs) {
+      found.add(pinKey(repo, number));
+      if (!current.dismissed.includes(pinKey(repo, number)) && addPin(repo, number, id, id)) added += 1;
     }
     const missing = new Set();
     // Only a complete result list shows that a PR left the search.
-    if (data.search.issueCount <= found.size) {
+    if (result.count <= found.size) {
       const leaving = state.board.pins.filter((pin) => pin.via === id && pin.group === id && !found.has(pin.key) && state.data.get(pin.key)?.state === "OPEN");
       dropPins(leaving.filter((pin) => status.missing.has(pin.key)));
       for (const pin of leaving.filter((item) => !status.missing.has(item.key))) {
@@ -1382,14 +1598,14 @@ function renameGroup(group) {
 function editGroupSearch(group) {
   openPrompt({
     title: `Sync "${group.name}" with a search`,
-    hint: "New open pull requests it finds are pinned here; ones it pinned leave when they stop matching. Leave blank to stop.",
+    hint: "New open pull requests it finds are pinned here; ones it pinned leave when they stop matching. Leave blank to stop. GitLab: gitlab: reviewer_username=@me (any merge request list filter, key=value).",
     value: group.query || "",
     placeholder: "e.g. review-requested:@me label:ready",
     submit: "Save",
     allowEmpty: true,
     onSubmit(text) {
       // Scoped to the default repository like Add PRs, unless it names its own scope.
-      const query = !text || /(^|\s)(repo|org|user):/.test(text) ? text : `repo:${state.prefs.defaultRepo} ${text}`;
+      const query = !text || /^gitlab:/.test(text) || /(^|\s)(repo|org|user):/.test(text) ? text : `repo:${state.prefs.defaultRepo} ${text}`;
       if (query) Object.assign(group, { query, dismissed: group.dismissed || [] });
       else {
         delete group.query;
@@ -1455,7 +1671,8 @@ const OWNERS = [
 ];
 
 function isMine(pr) {
-  return pr.author.toLowerCase() === state.user?.login.toLowerCase();
+  const me = isGitlab(pr.repo) ? state.gitlabUser?.username : state.user?.login;
+  return Boolean(me) && pr.author.toLowerCase() === me.toLowerCase();
 }
 
 function setOwner(id) {
@@ -1617,9 +1834,21 @@ function undoPending() {
   toast(`Cancelled: ${item.label}`);
 }
 
+function addComment(pr, body) {
+  if (isGitlab(pr.repo)) return glRest("POST", `/projects/${encodeURIComponent(glPath(pr.repo))}/merge_requests/${pr.number}/notes`, { body });
+  return rest("POST", `/repos/${pr.repo}/issues/${pr.number}/comments`, { body });
+}
+
+/* On GitLab the board reads and comments; CI, branch updates, labels, approval and merge stay there. */
+function githubOnly(pr) {
+  if (!pr || !isGitlab(pr.repo)) return false;
+  toast(`${shortRef(pr.repo, pr.number)}: do this on GitLab`);
+  return true;
+}
+
 function postComment(pr, body) {
   defer(`${body} → ${shortRef(pr.repo, pr.number)}`, async () => {
-    await rest("POST", `/repos/${pr.repo}/issues/${pr.number}/comments`, { body });
+    await addComment(pr, body);
     refreshSoon(pr.key);
   });
 }
@@ -1697,7 +1926,7 @@ function sendComment(key) {
   const preview = body.replace(/\s+/g, " ");
   defer(`Comment “${preview.length > 40 ? `${preview.slice(0, 40)}…` : preview}” → ${shortRef(pr.repo, pr.number)}`, async () => {
     try {
-      await rest("POST", `/repos/${pr.repo}/issues/${pr.number}/comments`, { body });
+      await addComment(pr, body);
     } catch (error) {
       restore();
       throw error;
@@ -1711,6 +1940,7 @@ function closedNotice(pr) {
 }
 
 function ciCommand(kind, pr = cursorPR()) {
+  if (githubOnly(pr)) return;
   if (!pr || pr.state !== "OPEN") return closedNotice(pr);
   const commands = profileFor(pr.repo).ciCommands;
   const command = commands?.[kind];
@@ -1730,6 +1960,7 @@ function ciCommand(kind, pr = cursorPR()) {
 /* Merge the base branch into the PR head; optionally post a command once the
    new head commit is visible (CI commands apply to the latest commit). */
 function updateBranch(pr = cursorPR(), thenComment = null) {
+  if (githubOnly(pr)) return;
   if (!pr || pr.state !== "OPEN") return closedNotice(pr);
   if (!pr.canUpdate) return toast(`You cannot update ${shortRef(pr.repo, pr.number)} — the author has not allowed maintainer edits`, "error");
   if (pr.behind === 0) return toast(`${shortRef(pr.repo, pr.number)} is already up to date with ${pr.base}`);
@@ -1753,6 +1984,7 @@ function updateBranch(pr = cursorPR(), thenComment = null) {
 }
 
 async function toggleLabel(pr, name) {
+  if (githubOnly(pr)) return;
   if (!pr || pr.state !== "OPEN") return closedNotice(pr);
   const had = pr.labels.some((label) => label.name === name);
   const before = pr.labels;
@@ -1778,6 +2010,7 @@ function quickLabel(index, pr = cursorPR()) {
 }
 
 function approve(pr = cursorPR()) {
+  if (githubOnly(pr)) return;
   if (!pr || pr.state !== "OPEN") return closedNotice(pr);
   const ref = shortRef(pr.repo, pr.number);
   openChoice({
@@ -1795,6 +2028,7 @@ function approve(pr = cursorPR()) {
 }
 
 function mergeMenu(pr = cursorPR()) {
+  if (githubOnly(pr)) return;
   if (!pr || pr.state !== "OPEN") return closedNotice(pr);
   const ref = shortRef(pr.repo, pr.number);
   const method = profileFor(pr.repo).mergeMethod;
@@ -2043,6 +2277,11 @@ function renderTop() {
 
 /* The one-line answer to "what is going on with this PR, and what comes next?" */
 function verdict(pr, index) {
+  const result = verdictFor(pr, index);
+  return isGitlab(pr.repo) && result.action ? { ...result, action: null } : result;
+}
+
+function verdictFor(pr, index) {
   if (pr.state === "MERGED") return { tone: "done", text: "Merged" };
   if (pr.state === "CLOSED") return { tone: "done", text: "Closed" };
 
@@ -2264,7 +2503,7 @@ function row(pin, index) {
     return el("div", props, [
       el("div", { class: "row-main" }, [
         el("div", { class: `row-title${status.error ? " t-bad" : " muted"}`, text: status.error || "Loading…" }),
-        el("div", { class: "row-meta", text: `${pin.repo}#${pin.number}` })
+        el("div", { class: "row-meta", text: fullRef(pin.repo, pin.number) })
       ]),
       el("div", { class: "row-status" }),
       el("div", { class: "row-actions" }, [unpin])
@@ -2281,7 +2520,7 @@ function row(pin, index) {
         el("span", { class: "title-text", text: pr.title, title: pr.title })
       ]),
       el("div", { class: "row-meta" }, [
-        el("a", { class: "num", href: pr.url, target: "_blank", rel: "noopener", title: "Open on GitHub", onclick: (event) => event.stopPropagation(), text: shortRef(pr.repo, pr.number) }),
+        el("a", { class: "num", href: pr.url, target: "_blank", rel: "noopener", title: isGitlab(pr.repo) ? "Open on GitLab" : "Open on GitHub", onclick: (event) => event.stopPropagation(), text: shortRef(pr.repo, pr.number) }),
         authorName(pr.author),
         pr.reviewRequested ? el("span", { class: "t-warn", text: "your review requested" }) : null,
         el("span", { title: new Date(pr.updatedAt).toLocaleString(), text: `updated ${ago(pr.updatedAt)} ago` }),
@@ -2347,7 +2586,7 @@ function renderDetail(index) {
   if (!pr) {
     const status = state.status.get(pin.key) || {};
     return detail.replaceChildren(el("div", { class: "detail-empty" }, [
-      el("p", { text: `${pin.repo}#${pin.number}` }),
+      el("p", { text: fullRef(pin.repo, pin.number) }),
       el("p", { class: status.error ? "t-bad" : "muted", text: status.error || "Loading…" }),
       el("button", { class: "btn", onclick: () => removePin(pin.key), text: "Unpin" })
     ]));
@@ -2367,20 +2606,20 @@ function renderDetail(index) {
 
   blocks.push(el("div", { class: "detail-head" }, [
     el("div", { class: "btn-row detail-tools" }, [
-      btn("Open on GitHub ↗", () => openUrl(pr.url)),
+      btn(isGitlab(pr.repo) ? "Open on GitLab ↗" : "Open on GitHub ↗", () => openUrl(pr.url)),
       btn("Move to group…", () => openGroupPicker(pin)),
       btn("Refresh", () => queueRefresh(pin, { force: true })),
       btn("Unpin", () => removePin(pr.key))
     ]),
     el("div", { class: "detail-meta" }, [
-      el("a", { href: pr.url, target: "_blank", rel: "noopener", text: `${pr.repo}#${pr.number}` }),
+      el("a", { href: pr.url, target: "_blank", rel: "noopener", text: fullRef(pr.repo, pr.number) }),
       stateBadge(pr),
       authorName(pr.author),
       el("button", { class: "link-btn", onclick: () => toggleFollow(pr.author), text: isFollowed(pr.author) ? "Following ✓" : "Follow" }),
       el("span", { class: "muted", text: `updated ${ago(pr.updatedAt)} ago` })
     ]),
     el("h2", { text: pr.title }),
-    el("div", { class: "muted small", text: `+${pr.additions} −${pr.deletions} in ${pr.files} file${pr.files === 1 ? "" : "s"} · last commit ${ago(pr.headDate)} ago` })
+    el("div", { class: "muted small", text: pr.additions === null ? `${pr.files ?? "?"} changed file${pr.files === "1" ? "" : "s"} · head ${pr.headOid.slice(0, 7)}` : `+${pr.additions} −${pr.deletions} in ${pr.files} file${pr.files === 1 ? "" : "s"} · last commit ${ago(pr.headDate)} ago` })
   ]));
 
   blocks.push(el("div", { class: `banner tone-${result.tone}` }, [
@@ -2430,7 +2669,7 @@ function renderDetail(index) {
           text: conflict ? `Conflicts with ${pr.base}` : pr.behind === null ? `Targets ${pr.base}` : pr.behind ? `${pr.behind} commit${pr.behind === 1 ? "" : "s"} behind ${pr.base}` : `Up to date with ${pr.base}`
         }),
         pr.behind && !conflict && pr.canUpdate ? btn("Update branch", () => updateBranch(pr), { title: `Merge ${pr.base} into this branch` }) : null,
-        pr.behind && !conflict && !pr.canUpdate ? el("span", { class: "muted small", text: "maintainer edits are off" }) : null
+        !isGitlab(pr.repo) && pr.behind && !conflict && !pr.canUpdate ? el("span", { class: "muted small", text: "maintainer edits are off" }) : null
       ])
     ]));
 
@@ -2438,7 +2677,7 @@ function renderDetail(index) {
     side.push(panel("Review & merge", [
       el("div", { text: reviewSentence(pr) }),
       pr.reviewRequested ? el("div", { class: "t-warn", text: "Your review is requested" }) : null,
-      el("div", { class: "btn-row" }, [
+      isGitlab(pr.repo) ? el("div", { class: "muted small", text: "Approve and merge on GitLab." }) : el("div", { class: "btn-row" }, [
         mine?.state === "APPROVED" ? el("span", { class: "t-good", text: "✓ You approved" }) : btn("Approve", () => approve(pr)),
         btn(pr.autoMerge ? "Auto-merge is on…" : "Merge…", () => mergeMenu(pr))
       ])
@@ -2446,7 +2685,7 @@ function renderDetail(index) {
 
     side.push(panel("Labels", [
       pr.labels.length ? el("div", { class: "label-wrap" }, pr.labels.map(labelChip)) : el("div", { class: "muted", text: "No labels" }),
-      el("div", { class: "btn-row" }, [
+      isGitlab(pr.repo) ? null : el("div", { class: "btn-row" }, [
         ...profile.quickLabels.map((name) => btn(hasLabel(name) ? `Remove ${name}` : `Add ${name}`, () => toggleLabel(pr, name))),
         btn("Edit labels…", () => openLabels(pr))
       ])
@@ -2651,7 +2890,9 @@ async function linkCodeRefs(container, pr, meta) {
     }
     if (!line || !CODE_PATH.test(path) || !/[./]/.test(path)) continue;
     let href = null;
-    if (current && pr.url && window.crypto?.subtle) {
+    if (isGitlab(pr.repo)) {
+      if (commit) href = `${pr.webBase}/-/blob/${commit}/${path.split("/").map(encodeURIComponent).join("/")}#L${line}${end ? `-${end}` : ""}`;
+    } else if (current && pr.url && window.crypto?.subtle) {
       href = `${pr.url}/files#diff-${await sha256Hex(path)}R${line}${end ? `-R${end}` : ""}`;
     } else if (commit) {
       href = `https://github.com/${pr.repo}/blob/${commit}/${path.split("/").map(encodeURIComponent).join("/")}#L${line}${end ? `-L${end}` : ""}`;
@@ -2798,6 +3039,7 @@ async function connect() {
     state.user = user;
     loadUserState();
     tick();
+    loadGitlabUser();
   } catch (error) {
     state.authError = state.authError || error.message;
   }
@@ -2814,6 +3056,9 @@ function signOut(message = "") {
   localStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(SESSION_KEY);
   state.token = "";
+  // Signing out removes the GitLab token too; GitHub rejecting its token leaves it alone.
+  if (!message) storeGitlabToken("");
+  state.gitlabUser = null;
   state.user = null;
   state.modal = null;
   state.query = "";
@@ -3031,7 +3276,7 @@ function openAdd(groupId = targetGroupId()) {
 
   search(openPicker({
     title: `Add pull requests → ${group.name}`,
-    placeholder: `Search ${repo}, @author, or paste PR numbers / URLs`,
+    placeholder: `Search ${repo}, @author, or paste PR numbers / URLs (GitLab MR URLs too)`,
     hint: "Click a pull request to pin it; click again to unpin.",
     tabs,
     onQuery: searchSoon,
@@ -3044,7 +3289,7 @@ function openAdd(groupId = targetGroupId()) {
           id: pinKey(ref.repo, ref.number),
           ref,
           node: el("div", { class: "result" }, [
-            el("span", { class: "num", text: `${ref.repo}#${ref.number}` }),
+            el("span", { class: "num", text: fullRef(ref.repo, ref.number) }),
             el("span", { class: "muted", text: pinByKey(pinKey(ref.repo, ref.number)) ? "already pinned" : "press Enter to pin" })
           ])
         }));
@@ -3093,6 +3338,7 @@ function openAdd(groupId = targetGroupId()) {
 }
 
 function openLabels(pr = cursorPR()) {
+  if (githubOnly(pr)) return;
   if (!pr || pr.state !== "OPEN") return;
   let all = state.labels.get(pr.repo)?.items || [];
   const appliedAtOpen = new Set(pr.labels.map((label) => label.name));
@@ -3183,6 +3429,12 @@ function openSettings() {
   const following = el("input", { type: "text", value: state.prefs.following.join(" "), placeholder: "usernames, separated by spaces", spellcheck: "false", onkeydown: (event) => event.key === "Enter" && save() });
   const reportSourcesInput = el("textarea", { rows: 3, spellcheck: "false", placeholder: "owner/repo = reports-owner/reports-repo@branch:reviews/pr-{number}-review.md" });
   reportSourcesInput.value = state.prefs.reportSources.join("\n");
+  const gitlabUrl = el("input", { type: "text", value: state.prefs.gitlabUrl, spellcheck: "false", placeholder: "https://gitlab.example.com" });
+  const gitlabToken = el("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: state.gitlabToken ? "saved · type a new one to replace it" : "glpat-…" });
+  const gitlabStatus = !state.prefs.gitlabUrl ? "Off."
+    : state.gitlabError ? `Problem: ${state.gitlabError}`
+    : state.gitlabUser ? `Signed in to GitLab as ${state.gitlabUser.username}.`
+    : state.gitlabToken ? "Checking the token…" : "No token yet.";
   const file = el("input", {
     type: "file",
     accept: "application/json,.json",
@@ -3239,6 +3491,9 @@ function openSettings() {
     const sourceLines = reportSourcesInput.value.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
     const badSource = sourceLines.find((line) => !parseReportSource(line));
     if (badSource) return toast(`Report source must look like owner/repo = owner/reports@branch:dir/pr-{number}.md: ${badSource}`, "error");
+    const glUrl = normalizeGitlabUrl(gitlabUrl.value);
+    if (gitlabUrl.value.trim() && !glUrl) return toast("GitLab URL must look like https://gitlab.example.com", "error");
+    if (glUrl && !gitlabToken.value.trim() && !state.gitlabToken) return toast("Add a GitLab personal access token (scope api)", "error");
     const commands = Object.fromEntries(PROFILE_COMMAND_KEYS.map((key) => [key, commandInputs[key].value.trim()]));
     const hasCommands = PROFILE_COMMAND_KEYS.some((key) => commands[key]);
     state.prefs.defaultRepo = repo;
@@ -3247,6 +3502,15 @@ function openSettings() {
     state.prefs.unpinClosed = unpinClosed.checked;
     state.prefs.theme = theme.value;
     state.prefs.following = parseLogins(following.value);
+    const gitlabChanged = glUrl !== state.prefs.gitlabUrl || Boolean(gitlabToken.value.trim());
+    state.prefs.gitlabUrl = glUrl;
+    if (!glUrl) storeGitlabToken("");
+    else if (gitlabToken.value.trim()) storeGitlabToken(gitlabToken.value.trim());
+    if (gitlabChanged) {
+      state.gitlabUser = null;
+      state.gitlabError = "";
+      loadGitlabUser();
+    }
     const sources = [...new Set(sourceLines.map((line) => parseReportSource(line).line))];
     if (sources.join("\n") !== state.prefs.reportSources.join("\n")) {
       state.prefs.reportSources = sources;
@@ -3297,6 +3561,10 @@ function openSettings() {
       el("label", { class: "check-row" }, [unpinClosed, "Unpin merged/closed PRs after a day"]),
       el("label", { class: "field" }, ["Following", following]),
       el("p", { class: "muted small", text: "Their names are highlighted, and Add PRs gets a Following list." }),
+      el("h2", { text: "GitLab" }),
+      el("label", { class: "field" }, ["GitLab URL · blank turns GitLab off", gitlabUrl]),
+      el("label", { class: "field" }, ["Personal access token · scope api", gitlabToken]),
+      el("p", { class: "muted small", text: `${gitlabStatus} Pin a merge request by pasting its URL or group/project!123; sync a group with gitlab: reviewer_username=@me. The token stays in this browser, like the GitHub token, and is sent only to this GitLab.` }),
       el("label", { class: "field" }, ["AI review reports · one source per line", reportSourcesInput]),
       el("p", { class: "muted small" }, [
         "For PRs in ", el("code", { text: "owner/repo" }), ", read reports from a directory in another repository; ",

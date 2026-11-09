@@ -99,6 +99,16 @@ Open PRs refresh every 60 seconds by default (configurable), background tabs fiv
 
 `owner/repo#123` or a URL pins a PR from anywhere. The Settings button also lets you configure a repository's workflow directly in the browser: which checks count as CI, the gating pipeline, comment commands, quick labels, and merge method. Profiles are selectable from a dropdown and can be deleted; deleting a built-in profile override restores its built-in defaults. These overrides are cached in `localStorage` with the rest of that GitHub user's preferences, so they work on the published site and survive reloads. Built-in defaults live in `REPO_PROFILES` at the top of `app.js`; repositories without a saved or built-in profile start with every check treated as CI and no CI commands.
 
+## GitLab merge requests
+
+Settings → **GitLab** takes the instance URL (e.g. `https://gitlab.example.com`) and a personal access token with the `api` scope. The token is stored like the GitHub one, only in this browser, and is sent only to that GitLab instance. The instance must allow cross-origin requests from the board's address.
+
+Paste a merge request URL or `group/project!123` into **+ Add PRs** to pin it. A merge request shows its state, the head pipeline's jobs as CI, conflicts, approvals, labels, the latest notes (inline ones say which line), and the AI review report if a source is configured for `gl:group/project`. **Your review requested** means you are one of its reviewers. The comment box posts a note on the merge request.
+
+To pin merge requests automatically, give a group a **Sync search** starting with `gitlab:` followed by filters of GitLab's merge request list as `key=value`, e.g. `gitlab: reviewer_username=@me` or `gitlab: project=group/project author_username=someone`. `@me` is the token's user.
+
+CI commands, branch updates, labels, approve and merge are not available for GitLab merge requests; do those on GitLab. Base-branch failure history is not read for GitLab, so only other pinned merge requests count as evidence that a failure is unrelated.
+
 ## Run it
 
 Open `index.html`, or serve the folder:
